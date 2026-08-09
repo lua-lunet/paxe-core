@@ -1,0 +1,72 @@
+[package]
+name = "paxe-core"
+version = "0.1.0"
+# Edition 2021, deliberately not 2024: this crate has zero dependencies and
+# needs nothing from the newer edition, and 2021 keeps the toolchain floor
+# low and the unsafe-attribute syntax simple (#[no_mangle], not
+# #[unsafe(no_mangle)]). Matches the conservative toolchain pin in
+# rust-toolchain.toml.
+edition = "2021"
+rust-version = "1.70"
+description = "Sans-io PAXE datagram encryption core (AES-256-GCM, standard and DEK modes, per-link keys) with a C ABI for LuaJIT FFI."
+repository = "https://github.com/lua-lunet/paxe-core"
+license = "MIT"
+readme = "README.md"
+keywords = ["encryption", "aes-gcm", "udp", "libsodium", "sans-io"]
+categories = [
+    "cryptography",
+    "network-programming",
+    "external-ffi-bindings",
+]
+authors = []
+
+# `name = "paxe"` deliberately differs from the package name so consumers
+# write `use paxe::dek`, and so the test suite this crate was extracted from
+# compiles verbatim.
+#
+# The extraction changed no protocol logic. It did: move the C ABI out of
+# lib.rs into ffi.rs and make the protocol modules `pub` (they were private
+# behind the FFI, which left no Rust API for a consumer); silence three
+# clippy lints that `-D warnings` turns into errors; and fix a build.rs bug
+# where the staged libsodium archive inherited the source's read-only mode
+# and broke every subsequent build-script run. The 87 core tests are
+# unchanged and still pass.
+[lib]
+name = "paxe"
+crate-type = ["rlib", "cdylib", "staticlib"]
+
+# The demo node. A binary, not a second crate: it needs the library and
+# nothing needs it, so it stays out of the published artifact's dependency
+# graph while still being built and tested by `cargo test --all-targets`.
+[[bin]]
+name = "six-seven-server"
+path = "src/bin/six-seven-server/main.rs"
+
+[features]
+# The C ABI. On by default; see src/lib.rs for why a consumer that exports
+# its own `lunet_paxe_*` symbols must turn it off.
+default = ["ffi"]
+ffi = []
+
+# DEPENDENCY POLICY: zero crates. Not libc, not zeroize, not secrecy, not a
+# crypto crate. All cryptography AND all secure-memory handling come from
+# libsodium via extern "C" declarations, statically linked into this crate:
+# sodium_malloc/sodium_mlock/sodium_memzero give guarded, locked, reliably
+# zeroed key storage. The demo binary holds the line too — its STOMP and
+# UDP transports are `std::net` and `std::thread` only. This section stays
+# empty by decision, not by accident; do not add entries without owner
+# sign-off.
+[dependencies]
+
+[dev-dependencies]
+
+[profile.release]
+opt-level = 3
+lto = true
+codegen-units = 1
+# Never unwind through an FFI boundary: unwinding into the LuaJIT host is
+# undefined behaviour, and with panic = "abort" a panic kills the whole
+# host process. The resulting no-panic-on-any-input constraint is a hard
+# design rule documented in src/lib.rs.
+panic = "abort"
+strip = "symbols"

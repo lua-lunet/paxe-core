@@ -1,0 +1,19 @@
+# Pinned Rust toolchain for lunet-paxe.
+#
+# channel = "1.95.0": a recent stable (2026-04) that is already installed on
+# the project's development machines and exists for x86_64/aarch64 Linux,
+# macOS and Windows, so cargo/rustup behaves identically on all three CI
+# platforms and locally. An explicit version - not "stable" - so a toolchain
+# release can never break the build without a code change, the same reason
+# xmake is pinned in .mise.toml and CI. Bump deliberately, in its own
+# commit, after building on all three platforms.
+#
+# Decision: this file is crate-local (ext/paxe/), NOT at the repository
+# root. A root file would also govern ext/jsonic, silently changing how an
+# unrelated crate builds - that is out of scope for the PAXE batch and
+# would have to be announced, not done silently. rustup resolves
+# rust-toolchain.toml from the current working directory upward, so cargo
+# must be invoked with ext/paxe as the working directory (the xmake
+# build-paxe task and the CI step both do this).
+[toolchain]
+channel = "1.95.0"
