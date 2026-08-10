@@ -21,6 +21,13 @@ epoch)`, where the epoch is in `0..=31`.
 Every AES-GCM invocation uses a fresh 12-byte nonce from the operating system
 CSPRNG. Key and nonce material must not be caller-selectable in production.
 
+For a cluster-wide PSK, nonce accounting is cluster-wide too: count every
+AES-GCM invocation made by every node with that PSK, including standard frames
+and reusable-DEK envelopes. The birthday bound applies to that aggregate count;
+at approximately `2^32` invocations, the probability of a 96-bit nonce
+collision remains below `2^-32`. Rotation policy must therefore count the
+whole cluster, not an individual link or sender.
+
 ## Common prefix
 
 Every frame starts with this nine-byte prefix:
@@ -141,6 +148,11 @@ before producing frames, rejects duplicate recipients, preserves recipient
 order, encrypts the body exactly once, and gives every recipient a distinct
 envelope nonce and independently authenticated DEK envelope.
 
+The C ABI deliberately exposes only the one-recipient standard sealer. A Rust
+host using fanout records each returned reusable-DEK frame that it accepts for
+transmission with `stats::record_tx_sealed(Mode::Dek)`; `tx_dek` does not
+advance merely because fanout returned a vector.
+
 Receivers choose the parser only from the validated mode flag. They never infer
 the mode from payload or datagram size.
 
@@ -172,7 +184,7 @@ Tests must pin at least the following behavior:
 
 - byte-exact standard and reusable-DEK known-answer vectors derived independently
   from the Rust implementation;
-- standard sealing for payload sizes on both sides of 64 bytes;
+- standard sealing for small and large payloads;
 - identical reusable body bytes and distinct envelopes for two or more recipients;
 - recipient ordering, duplicate rejection, missing-PSK rejection, and
   all-or-nothing fanout;

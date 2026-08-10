@@ -42,7 +42,7 @@ does not implement TLS, ECDHE, SRP, certificates, or network key negotiation.
 | Reusable-DEK mode | body encrypted once, separately authenticated DEK envelope per recipient; 97-byte overhead |
 | Mode selection | one-recipient seal is always standard; reusable-DEK requires explicit fanout |
 | Keys | addressed by `(peer, epoch)`, 0-31 epochs, guarded/locked/zero-on-drop memory |
-| C ABI | `cdylib` + `staticlib` + [`include/paxe.h`](include/paxe.h) |
+| C ABI | `cdylib` + `staticlib` + [`include/paxe.h`](include/paxe.h); standard one-recipient sealing only |
 
 ### Two properties worth knowing before you use it
 
@@ -73,9 +73,15 @@ missing archive fails the build rather than silently linking something else.
 
 `cargo test` runs unit and matrix tests per protocol path, targeted regressions,
 seeded property tests, and **known-answer vectors pinned byte-for-byte** —
-hand-derived from the specification with the crypto bytes
-produced by an independent OpenSSL/Python implementation, so a change to this
-crate cannot quietly redefine the wire format to agree with itself.
+derived from the specification with crypto bytes produced by an independent
+OpenSSL EVP helper that is first checked against a published AES-256-GCM vector,
+so a change to this crate cannot quietly redefine the wire format to agree with
+itself.
+
+The C ABI intentionally offers standard one-recipient sealing only. Rust hosts
+that use reusable-DEK fanout record each returned frame actually accepted for
+transmission with `stats::record_tx_sealed(Mode::Dek)`; this is when `tx_dek`
+advances.
 
 `tests/six_seven_e2e.sh` starts two real nodes on real sockets and asserts that
 keys land on the right one, that the wrong one forwards over PAXE and relays the
