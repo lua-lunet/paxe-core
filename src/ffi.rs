@@ -1222,7 +1222,7 @@ mod ffi_tests {
     }
 
     // -------------------------------------------------------------------
-    // : counters at the FFI boundary. Delta-measured throughout —
+    // Counters at the FFI boundary. Delta-measured throughout —
     // no absolute values (the counters are cumulative process state).
     // -------------------------------------------------------------------
 
@@ -1498,7 +1498,7 @@ mod ffi_tests {
     }
 
     // -------------------------------------------------------------------
-    // : the protected-socket plaintext gate. A datagram is "for us"
+    // The protected-socket plaintext gate. A datagram is "for us"
     // iff it carries at least the 9-byte prefix AND a header toId equal
     // to the configured local id — the explicit check, never the flags
     // byte. Counting: a rejection moves rx_total AND rx_plaintext, each

@@ -141,7 +141,7 @@ body is detected.
 
 The one-recipient seal operation always produces a standard frame. Reusable-DEK
 mode is available only through an explicit fanout operation. There is no
-payload-size threshold and no production API for forcing a mode.
+payload-size-based mode selection and no production API for forcing a mode.
 
 The fanout operation is all-or-nothing. It validates every recipient and PSK
 before producing frames, rejects duplicate recipients, preserves recipient
