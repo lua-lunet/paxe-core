@@ -1365,7 +1365,13 @@ mod ffi_tests {
                 R::NoPeer => {
                     lunet_paxe_shutdown();
                     assert_eq!(lunet_paxe_set_local_id(300), RC_OK);
-                    assert_one_drop(&frame63, reason);
+                    // The receive path now rejects a foreign destination
+                    // before looking up its source key. Retarget this
+                    // otherwise-valid frame so this arm continues to reach
+                    // the intended missing-peer gate.
+                    let mut no_peer = frame63.clone();
+                    no_peer[2..4].copy_from_slice(&300u16.to_be_bytes());
+                    assert_one_drop(&no_peer, reason);
                 }
                 // rx_no_epoch: B knows peer A but not epoch 4 — a
                 // ROTATION problem.
