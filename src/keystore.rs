@@ -1,12 +1,5 @@
-//! The secure keystore (item03): per-link key material held ONLY in
+//! The secure keystore: per-link key material held ONLY in
 //! libsodium guarded allocations, keyed by `(peer node id, epoch)`.
-//!
-//! This module replaces the deleted C `static keystore_entry_t
-//! g_keystore[256]` — a BSS array of raw keys that was swappable to disk,
-//! present in every core dump, unguarded, and erased only by a
-//! `paxe_keystore_clear` the runtime never called. Every one of those
-//! properties is inverted here, and most of them are inverted at the type
-//! level rather than by convention:
 //!
 //! - **Material lives only in guarded memory.** [`StoredKey`] owns a
 //!   [`sodium::GuardedAllocation`] (`sodium_malloc`: guard pages + canary),
@@ -22,10 +15,7 @@
 //!   compiler-checked property.
 //! - **Honest deletion.** The container is a `BTreeMap<(u16, Epoch),
 //!   StoredKey>`. Removal drops the value and runs its destructor: there
-//!   are no tombstones, and no terminate-at-first-hole probe. The deleted
-//!   C's probe was sound only because per-entry delete did not exist;
-//!   epoch retirement IS a per-entry delete, so that structure could not
-//!   have survived this item.
+//!   are no tombstones or probe-chain deletion hazards.
 //!
 //! ## Addressing: `(peer, epoch)`, and the send/receive asymmetry
 //!
@@ -42,11 +32,10 @@
 //! - **Receive** ([`KeyStore::key_for_receive`]): the peer is the frame's
 //!   `fromId` — we open with the key we share with the source.
 //!
-//! The two entry points are deliberately separate so the codec and
-//! seal/open items (04–06) name the direction at every call site and the
-//! asymmetry cannot be transposed silently. The unit test for this uses
-//! TWO DIFFERENT node ids, because with `fromId == toId` a transposed
-//! lookup returns the same slot and proves nothing.
+//! The two entry points are deliberately separate so every call site names
+//! the direction and cannot transpose the asymmetry silently. Tests use
+//! two different node ids because `fromId == toId` would resolve either
+//! lookup to the same slot and prove nothing.
 //!
 //! ## Capacity bound
 //!
@@ -55,9 +44,8 @@
 //! epochs per peer) or 32 peers holding all 32 epochs each. The bound
 //! also caps wired memory: each entry is one guarded allocation (~one
 //! locked page), so a full store pins roughly 4 MiB of RAM. Exceeding the
-//! bound is [`KeystoreError::Full`] — a clear, reportable error, never
-//! the deleted C's silent "full" return. OS lock limits
-//! (RLIMIT_MEMLOCK) can bite first; that surfaces as
+//! bound is [`KeystoreError::Full`]. OS lock limits (RLIMIT_MEMLOCK) can
+//! bite first; that surfaces as
 //! [`KeystoreError::Sodium`], equally explicit.
 //!
 //! ## Erasure: three paths, plus what survives `panic = "abort"`
@@ -75,9 +63,7 @@
 //! `sodium_free` (which itself zeroes, verifies the canary, unlocks and
 //! releases). BUT the crate is built `panic = "abort"`: on an abort,
 //! destructors do not run, so drop-ordering erasure cannot be the only
-//! protection. What survives an abort is PLATFORM-SPLIT — item15
-//! verified both halves against real crash state, and item15b closed
-//! the macOS half:
+//! protection. Crash-time protection is platform-specific:
 //!
 //! - **Swap:** `sodium_mlock` pins the guarded pages in RAM on every
 //!   supported platform; locked pages never reach swap.
@@ -89,13 +75,10 @@
 //!   them locked instead of `MlockFailed` at some arbitrary key count.
 //! - **Core dumps, Linux:** libsodium's `sodium_mlock` sets
 //!   `MADV_DONTDUMP`, so the guarded pages are excluded from the kernel
-//!   core. Verified: a 32-byte guarded key pattern appeared 0 times in
-//!   a real post-abort core while a heap control pattern was found.
+//!   core.
 //! - **Core dumps, macOS:** mlock gives NO exclusion — Darwin has no
-//!   `MADV_DONTDUMP`, and item15 recovered the full key from dumpable
-//!   post-abort memory (guard pages on either side verified intact, so
-//!   the region was a genuine guarded one). The abort-time defence on
-//!   Darwin is item15b's `setrlimit(RLIMIT_CORE, 0)` at
+//!   `MADV_DONTDUMP`. The abort-time defence on Darwin is
+//!   `setrlimit(RLIMIT_CORE, 0)` at
 //!   `lunet_paxe_init` — the kernel then writes no core at all, so no
 //!   page, guarded or not, can disclose material through one. Default
 //!   on, with `LUNET_PAXE_ALLOW_CORE_DUMPS=1` as the documented
@@ -116,20 +99,14 @@
 //! across threads at compile time.
 //!
 //! Justification: every caller runs on the one LuaJIT VM thread — the
-//! Lua-facing API (item07) is entered through the LuaJIT FFI from Lua
-//! state, and the UDP receive path (item09) drives Lua from the libuv
+//! Lua-facing API is entered through the LuaJIT FFI from Lua state, and
+//! the UDP receive path drives Lua from the libuv
 //! loop thread. No second thread ever touches the store. A `Mutex` would
 //! buy nothing and would import a poisoning failure mode that
 //! `panic = "abort"` converts into a process kill with no unwind. If a
 //! future embedding genuinely calls from multiple threads, the owner must
 //! synchronise externally (e.g. wrap the whole store in a `Mutex`) — that
-//! is the recorded constraint.
-
-// Callers land in items 04-07 (codec, seal/open, Lua API). Until then the
-// public surface of this module is exercised only by its unit tests, so
-// dead_code is allowed here on the same terms as sodium.rs: remove the
-// allowance as those items land.
-#![allow(dead_code)]
+//! is the public constraint.
 
 use crate::sodium::{self, GuardedAllocation, SodiumError, KEYBYTES};
 use std::collections::BTreeMap;
@@ -227,7 +204,7 @@ impl StoredKey {
     /// pages are what keep material out of swap on every platform and out
     /// of core dumps ON LINUX (`MADV_DONTDUMP`). On macOS mlock excludes
     /// nothing from cores — the core-dump defence there is the init-time
-    /// `RLIMIT_CORE` suppression (item15b). See the module docs for the
+    /// `RLIMIT_CORE` suppression. See the module docs for the
     /// full platform split that survives `panic = "abort"`.
     ///
     /// On any failure the partial allocation is dropped — `sodium_free`
@@ -276,8 +253,8 @@ impl Drop for StoredKey {
 pub struct KeyStore {
     /// This node's own id, configured once. Not part of any key: per-link
     /// keys are indexed by the peer alone because "local" is the same for
-    /// every entry in this store. Recorded for the codec/AAD layers
-    /// (items 04-07) and for diagnostics.
+    /// every entry in this store. Used by the codec/AAD layers and for
+    /// diagnostics.
     local_id: u16,
     /// Honest structure: removal drops the value and runs its destructor.
     /// No tombstones, no terminate-at-first-hole probe — per-entry delete
@@ -363,7 +340,7 @@ impl KeyStore {
     /// send epoch; "retire the old epoch" then removes the superseded
     /// key. Numeric epochs are the rotation ordering, so highest ==
     /// newest by convention (documented in PAXE.md "Lua API"). The
-    /// Lua-facing seal (item07) takes no epoch parameter precisely so
+    /// Lua-facing seal takes no epoch parameter precisely so
     /// this rule is the only selection on the send path.
     ///
     /// Entries for one peer are contiguous under the `(peer, epoch)`
@@ -378,7 +355,7 @@ impl KeyStore {
     }
 
     /// Whether ANY epoch is installed for `peer`. Receive-side reason
-    /// classification for the item08 counters: a key miss against a peer
+    /// classification for the counters: a key miss against a peer
     /// with no entries at all is "unknown peer" (a TOPOLOGY problem — the
     /// link was never provisioned), while a miss against a peer holding
     /// other epochs is "unknown epoch" (a ROTATION problem — the two ends
@@ -434,7 +411,7 @@ impl KeyStore {
 // destructor runs `sodium_memzero` and then `sodium_free` (which zeroes
 // again); `sodium_mlock` keeps the pages out of swap on every platform
 // and out of core dumps on Linux (`MADV_DONTDUMP`) — and on macOS the
-// init-time `RLIMIT_CORE` suppression (item15b) keeps the kernel from
+// init-time `RLIMIT_CORE` suppression keeps the kernel from
 // writing a core at all. Those are the protections that survive
 // `panic = "abort"`; the module docs carry the full platform split.
 // ---------------------------------------------------------------------------
@@ -640,7 +617,7 @@ mod tests {
 
     #[test]
     fn peer_known_distinguishes_topology_from_rotation() {
-        // The item08 split: no entries at all for the peer -> unknown
+        // The split: no entries at all for the peer -> unknown
         // peer; entries under other epochs -> unknown epoch.
         let mut ks = KeyStore::new(LOCAL).expect("new");
         assert!(!ks.peer_known(PEER));

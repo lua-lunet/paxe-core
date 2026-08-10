@@ -20,17 +20,7 @@ categories = [
 ]
 authors = []
 
-# `name = "paxe"` deliberately differs from the package name so consumers
-# write `use paxe::dek`, and so the test suite this crate was extracted from
-# compiles verbatim.
-#
-# The extraction changed no protocol logic. It did: move the C ABI out of
-# lib.rs into ffi.rs and make the protocol modules `pub` (they were private
-# behind the FFI, which left no Rust API for a consumer); silence three
-# clippy lints that `-D warnings` turns into errors; and fix a build.rs bug
-# where the staged libsodium archive inherited the source's read-only mode
-# and broke every subsequent build-script run. The 87 core tests are
-# unchanged and still pass.
+# `name = "paxe"` gives consumers the concise `use paxe::...` import path.
 [lib]
 name = "paxe"
 crate-type = ["rlib", "cdylib", "staticlib"]

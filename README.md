@@ -4,6 +4,8 @@ A **sans-io** PAXE datagram-encryption core library in Rust, with a C ABI for
 LuaJIT FFI and a deliberately silly demo server for exercising it over real
 sockets.
 
+The wire and security contract is defined in [PAXE.md](PAXE.md).
+
 Sans-io means the whole protocol is a function of its inputs: you hand it a
 payload and a keystore and get a sealed frame back. No sockets, no threads, no
 async runtime, no callbacks. The host owns transport and timers.
@@ -25,24 +27,20 @@ cargo test
 ## Why this exists
 
 PAXE is AES-256-GCM authenticated encryption for **datagrams** — a wire format
-with per-link keys, key epochs, and a payload-size-driven choice between two
-framings. It is not a stream cipher construction and not a TLS substitute: it
-protects one UDP payload at a time, with no handshake, no session, and no
-ordering guarantees, because the transports it targets have none either.
+with out-of-band pre-shared keys (PSKs), key epochs, standard one-recipient
+frames, and explicit reusable-DEK fanout. It protects one UDP payload at a time,
+with no handshake, session, ordering, or replay guarantees.
 
-This crate is extracted from [lunet](https://github.com/lua-lunet/lunet), where
-it replaced a C implementation that did not actually implement the protocol —
-the header layout, the flags position, the on-wire key id and the documented
-overheads were all wrong. Extraction follows the same manoeuvre as
-[vrr-core](https://github.com/lua-lunet/vrr-core): the core lives here, and the
-host points Cargo at a commit.
+PSKs are installed by the host from configuration, a secret manager, or another
+operator-controlled mechanism. PAXE only looks up an already installed key. It
+does not implement TLS, ECDHE, SRP, certificates, or network key negotiation.
 
 | | |
 |---|---|
 | Wire format | `fromId`/`toId`/`channel`/`length` header, separate flags byte, 9-byte AAD |
-| Standard mode | one AES-256-GCM seal under the link key; 37-byte overhead |
-| DEK mode | per-frame data encryption key, wrapped under the link key; 83-byte overhead |
-| Mode selection | automatic at 64 bytes; the receiver parses by the flags bit, never by size |
+| Standard mode | one AES-256-GCM seal under the recipient PSK; 37-byte overhead |
+| Reusable-DEK mode | body encrypted once, separately authenticated DEK envelope per recipient; 97-byte overhead |
+| Mode selection | one-recipient seal is always standard; reusable-DEK requires explicit fanout |
 | Keys | addressed by `(peer, epoch)`, 0-31 epochs, guarded/locked/zero-on-drop memory |
 | C ABI | `cdylib` + `staticlib` + [`include/paxe.h`](include/paxe.h) |
 
@@ -61,7 +59,7 @@ design, not by omission.
 
 ## Dependencies
 
-Zero crates. Not `libc`, not `zeroize`, not a crypto crate. All cryptography and
+Zero crate dependencies. Not `libc`, not `zeroize`, not a crypto crate. All cryptography and
 all secure-memory handling come from libsodium via `extern "C"` declarations,
 statically linked by `build.rs`. The demo binary holds the same line: its STOMP
 and UDP transports are `std::net` and `std::thread` only.
@@ -73,9 +71,9 @@ missing archive fails the build rather than silently linking something else.
 
 ## Evidence
 
-`cargo test` runs 112 tests: unit and matrix tests per protocol path, targeted
-regressions, seeded property tests, and 11 **known-answer vectors pinned
-byte-for-byte** — hand-derived from the specification with the crypto bytes
+`cargo test` runs unit and matrix tests per protocol path, targeted regressions,
+seeded property tests, and **known-answer vectors pinned byte-for-byte** —
+hand-derived from the specification with the crypto bytes
 produced by an independent OpenSSL/Python implementation, so a change to this
 crate cannot quietly redefine the wire format to agree with itself.
 

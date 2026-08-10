@@ -1,7 +1,7 @@
 //! The libsodium FFI boundary — the single most safety-critical module in
 //! the crate.
 //!
-//! Containment rule (item02, settled): **this is the only module in the
+//! Containment rule: **this is the only module in the
 //! crate that may contain an `extern "C"` block, declare `unsafe`, or call
 //! libsodium.** Everything else consumes the safe wrappers below as
 //! ordinary safe Rust, which keeps the audit surface for "is the FFI
@@ -10,10 +10,7 @@
 //!
 //! Every extern declaration carries its contract — buffer sizes, aliasing
 //! and in-place rules, return-value meaning, failure modes — taken from
-//! libsodium's documentation (doc.libsodium.org), NOT from the deleted
-//! `src/paxe.c`, which demonstrably misunderstood at least one primitive
-//! (it error-checked the un-failable stream XOR and mis-attributed the
-//! failure counter).
+//! libsodium's documentation (doc.libsodium.org).
 //!
 //! Wrapper discipline:
 //! - No caller ever touches a raw pointer: keys, nonces and tags are
@@ -28,12 +25,8 @@
 //!   break wire compatibility).
 
 // The crate root sets `#![deny(unsafe_code)]`; this module is the sole,
-// deliberate exception. The dead_code allowance is temporary: these
-// wrappers are the crate's foundation and are exercised by unit tests,
-// but their real callers are items 03-07, which do not exist yet. Remove
-// the allowance as those items land.
+// deliberate exception.
 #![allow(unsafe_code)]
-#![allow(dead_code)]
 
 use std::error::Error;
 use std::fmt;
@@ -150,34 +143,6 @@ mod ffi {
             k: *const c_uchar,
         ) -> c_int;
 
-        /// CONTRACT (libsodium docs, "Advanced / ChaCha20"):
-        /// UNAUTHENTICATED ChaCha20-IETF stream cipher: XORs the keystream
-        /// derived from key `k[32]` and 12-byte IETF nonce `n` with
-        /// `m[0..mlen)`, writing the result to `c`. Encryption and
-        /// decryption are the same operation. In-place (`c == m`) is
-        /// supported; the wrapper operates in place by construction.
-        ///
-        /// THE RETURN VALUE IS MEANINGLESS BY DESIGN. A stream XOR has no
-        /// authentication and cannot meaningfully fail — it returns 0.
-        /// There is no corruption detection: a corrupted input SILENTLY
-        /// produces a wrong output (here: a wrong wrapped DEK). Integrity
-        /// for a wrapped DEK comes from the AES-GCM tag over the enclosing
-        /// message, never from this primitive. This is written down here
-        /// because the deleted C checked this return value and attributed
-        /// a non-zero result to `rx_auth_fail`; that check was bogus and
-        /// must not be reintroduced.
-        ///
-        /// Nonce reuse under the same key leaks the XOR of the two
-        /// plaintexts: the nonce must be fresh per wrap, drawn from the
-        /// CSPRNG.
-        pub fn crypto_stream_chacha20_ietf_xor(
-            c: *mut c_uchar,
-            m: *const c_uchar,
-            mlen: c_ulonglong,
-            n: *const c_uchar,
-            k: *const c_uchar,
-        ) -> c_int;
-
         /// CONTRACT (libsodium docs, "Generating random data"):
         /// Fills `buf[0..size)` with unpredictable bytes from the system
         /// CSPRNG (seeded at `sodium_init`, reseeded as required). Cannot
@@ -194,8 +159,8 @@ mod ffi {
         /// `sodium_free` verifies, and its pages are `mlock`ed where the
         /// OS allows. mlock keeps pages out of SWAP on every supported
         /// platform; exclusion from CORE DUMPS is Linux-only
-        /// (`MADV_DONTDUMP` — Darwin has no equivalent and excludes
-        /// nothing; item15/item15b, see `disable_core_dumps`).
+        /// (`MADV_DONTDUMP` — Darwin has no equivalent; see
+        /// `disable_core_dumps`).
         ///
         /// - Returns NULL on failure — including RLIMIT_MEMLOCK exhaustion
         ///   from the implicit mlock, so failure is an OS-limit condition
@@ -215,9 +180,8 @@ mod ffi {
         /// Pins `addr[0..len)` in RAM (rounded to whole pages): the pages
         /// cannot be swapped out. On Linux libsodium additionally sets
         /// `MADV_DONTDUMP`, excluding the pages from core dumps; on
-        /// Darwin it CANNOT — no such mechanism exists, and item15
-        /// recovered a full mlocked key from dumpable macOS memory after
-        /// an abort (the gap item15b's `disable_core_dumps` closes).
+        /// Darwin it CANNOT because no equivalent mechanism exists;
+        /// `disable_core_dumps` closes that gap process-wide.
         /// Returns 0, or -1 on failure — typically ENOMEM when
         /// RLIMIT_MEMLOCK is exhausted. Failure is an OS-limit condition,
         /// not corruption; the caller decides policy.
@@ -254,8 +218,8 @@ mod ffi {
         /// there is no hookable path there for anyone.
         ///
         /// This is libc, not libsodium: declared here because this module
-        /// is the crate's sole `extern "C"` containment boundary (item02),
-        /// and item09's runtime-owned key erasure at process exit needs
+        /// is the crate's sole `extern "C"` containment boundary,
+        /// and runtime-owned key erasure at process exit needs
         /// it. The callback must not touch Rust thread-locals through
         /// panicking accessors — they may already be destroyed (see
         /// lib.rs `shutdown_state`, which uses `try_with`).
@@ -268,8 +232,8 @@ mod ffi {
         /// valid out-pointer.
         ///
         /// This is libc, not libsodium: declared here because this module
-        /// is the crate's sole `extern "C"` containment boundary (item02),
-        /// and item15b's startup core-dump suppression needs it. The
+        /// is the crate's sole `extern "C"` containment boundary,
+        /// and startup core-dump suppression needs it. The
         /// declarations are Unix-only; the wrappers below are cfg-gated
         /// the same way and carry a no-op stub elsewhere.
         #[cfg(all(unix, target_pointer_width = "64"))]
@@ -286,7 +250,7 @@ mod ffi {
     }
 
     // kernel32, not libsodium: declared here because this module is the
-    // crate's sole extern containment boundary (item02), and the Windows
+    // crate's sole extern containment boundary, and the Windows
     // page-locking budget below needs them. `extern "system"` is the
     // Win32 calling convention (stdcall on x86, identical to "C"
     // elsewhere); `HANDLE` is an opaque pointer and `BOOL` is a 32-bit
@@ -422,7 +386,7 @@ fn grow_locked_page_budget(len: usize) -> bool {
 }
 
 // ---------------------------------------------------------------------------
-// Process core-dump suppression (item15b). Unix-only: RLIMIT_CORE is POSIX;
+// Process core-dump suppression. Unix-only: RLIMIT_CORE is POSIX;
 // Windows crash dumps (WER) are a different mechanism outside this crate's
 // scope, where `disable_core_dumps` below is a no-op stub.
 // ---------------------------------------------------------------------------
@@ -445,11 +409,11 @@ struct RLimit {
     rlim_max: u64,
 }
 
-/// Register `cb` to run at normal process termination (item09: the
-/// runtime, not a script, owns key erasure at exit). Best-effort by
+/// Register `cb` to run at normal process termination. The runtime, not a
+/// script, owns key erasure at exit. Best-effort by
 /// contract: a registration failure (practically unreachable — glibc
-/// ENOMEM) is ignored, leaving erasure where it was before item09 — the
-/// thread-local destructor on platforms that run it for the main thread.
+/// ENOMEM) is ignored; the thread-local destructor remains active on
+/// platforms that run it for the main thread.
 /// Failing `init` over it would punish every platform for one platform's
 /// deficiency. Registered ONCE by the caller (an atomic guard); multiple
 /// registrations would still be harmless because the shutdown they run is
@@ -472,13 +436,10 @@ pub fn register_exit_hook(cb: extern "C" fn()) {
 /// limit to 0 so the kernel writes no core file on any fatal signal —
 /// SIGABRT included, which is the `panic = "abort"` crash shape. This is
 /// the strongest available guarantee that keystore material can never
-/// reach disk through a crash, and the only mechanism that works on
-/// Darwin: item15 verified that `sodium_mlock` excludes the guarded pages
-/// from a Linux core (via `MADV_DONTDUMP`) but that on macOS — which has
-/// no `MADV_DONTDUMP` and where `mlock` does not exclude pages — the full
-/// guarded key was readable in dumpable memory after an abort. After
-/// `RLIMIT_CORE` 0 there is no core at all, on any platform, so no page
-/// (guarded or not) can disclose material through one.
+/// reach disk through a crash. Linux also excludes locked guarded pages
+/// with `MADV_DONTDUMP`; macOS has no page-level equivalent. With
+/// `RLIMIT_CORE` set to zero there is no core file, so no page can disclose
+/// material through one.
 ///
 /// The hard limit is read back with `getrlimit` and passed through
 /// unchanged: lowering it would be irreversible for an unprivileged
@@ -634,7 +595,7 @@ macro_rules! fixed_bytes {
 }
 
 fixed_bytes! {
-    /// A 32-byte secret key (AES-256-GCM key; also the ChaCha20 wrap key).
+    /// A 32-byte AES-256-GCM secret key.
     Key, KEYBYTES
 }
 fixed_bytes! {
@@ -650,9 +611,9 @@ fixed_bytes! {
 impl Key {
     /// Borrow an exactly-sized byte array as a `Key` WITHOUT copying it.
     ///
-    /// This exists for the keystore (item03): a `StoredKey` exposes its
+    /// A `StoredKey` exposes its
     /// guarded material only as a borrowed `&[u8]`, and the seal/open paths
-    /// (items 05/06) must feed that material to the AEAD wrappers directly
+    /// must feed that material to the AEAD wrappers directly
     /// from the guarded allocation. The only other constructor,
     /// [`Key::from_bytes`], takes an owned array — forcing a 32-byte
     /// unguarded stack copy of the link key on every datagram, which is
@@ -842,41 +803,6 @@ pub fn aead_decrypt(
     Ok(plen)
 }
 
-// ---------------------------------------------------------------------------
-// ChaCha20-IETF stream XOR (DEK wrap/unwrap).
-// ---------------------------------------------------------------------------
-
-/// XOR `buf` in place with the ChaCha20-IETF keystream from `key`/`nonce`.
-/// Wrap and unwrap are the same call.
-///
-/// UNAUTHENTICATED, AND CANNOT MEANINGFULLY FAIL — this function
-/// deliberately returns `()`. The libsodium return value is always 0 and
-/// is intentionally ignored; a corrupted input silently produces a wrong
-/// output key. Integrity for a wrapped DEK comes from the AES-GCM tag
-/// over the enclosing message, checked by `aead_decrypt`, never from this
-/// primitive. Do NOT add an error check here: the deleted C's
-/// `rx_auth_fail` attribution on this call was bogus.
-///
-/// `nonce` must be fresh from the CSPRNG per wrap: nonce reuse under one
-/// key leaks the XOR of the two plaintexts.
-pub fn stream_xor(key: &Key, nonce: &Nonce, buf: &mut [u8]) {
-    if buf.is_empty() {
-        return;
-    }
-    let _rc = unsafe {
-        ffi::crypto_stream_chacha20_ietf_xor(
-            buf.as_mut_ptr(),
-            buf.as_ptr(),
-            buf.len() as c_ulonglong,
-            nonce.0.as_ptr(),
-            key.0.as_ptr(),
-        )
-    };
-    // _rc is documented meaningless; see the contract comment at the
-    // declaration. Intentionally not checked.
-}
-
-// ---------------------------------------------------------------------------
 // Randomness. CSPRNG only — never any other source.
 // ---------------------------------------------------------------------------
 
@@ -958,8 +884,8 @@ impl Drop for GuardedAllocation {
 
 /// Pin the pages backing `buf` in RAM: not swappable on any platform;
 /// excluded from core dumps on LINUX only (`MADV_DONTDUMP` — Darwin has
-/// no equivalent; core-dump suppression there is `disable_core_dumps`,
-/// item15b). Failure (typically RLIMIT_MEMLOCK) is reported, never
+/// no equivalent; core-dump suppression there is `disable_core_dumps`).
+/// Failure (typically RLIMIT_MEMLOCK) is reported, never
 /// panicked on; the caller decides policy.
 ///
 /// On Windows the budget is not an rlimit but the process minimum working
@@ -1196,31 +1122,6 @@ mod tests {
     }
 
     #[test]
-    fn stream_xor_is_an_involution_and_takes_no_error_path() {
-        init().expect("init");
-        let key = random_key();
-        let nonce = random_nonce();
-        let original: [u8; KEYBYTES] = [
-            1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24,
-            25, 26, 27, 28, 29, 30, 31, 32,
-        ];
-        let mut buf = original;
-        stream_xor(&key, &nonce, &mut buf);
-        assert!(!ct_eq(&buf, &original), "keystream must change the data");
-        stream_xor(&key, &nonce, &mut buf);
-        assert!(ct_eq(&buf, &original), "XOR twice must restore the DEK");
-
-        // A different nonce produces a different wrapping.
-        let mut buf2 = original;
-        let nonce2 = random_nonce();
-        stream_xor(&key, &nonce2, &mut buf2);
-        assert!(!ct_eq(&buf2, &original), "nonce must matter");
-
-        // Empty buffer: no FFI call, no panic, returns unit.
-        stream_xor(&key, &nonce, &mut []);
-    }
-
-    #[test]
     fn randomness_comes_from_the_csprng() {
         init().expect("init");
         let n1 = random_nonce();
@@ -1314,7 +1215,7 @@ mod tests {
         assert!(ct_eq(&[], &[]));
     }
 
-    /// item15b: the wrapper must move ONLY the soft limit, to exactly 0,
+    /// The wrapper must move ONLY the soft limit, to exactly 0,
     /// and pass the inherited hard limit through untouched (raising or
     /// lowering the hard limit would both be defects: EPERM / irreversible
     /// lock-in). Runs once per process; the effect is process-wide, which

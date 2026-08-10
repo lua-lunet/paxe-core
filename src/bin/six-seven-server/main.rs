@@ -568,8 +568,7 @@ fn send_to_peer(
     socket: &UdpSocket,
     message: &str,
 ) -> Result<(), String> {
-    // seal() picks standard or DEK mode by payload size on its own; the
-    // caller never chooses, so the two modes cannot drift apart here.
+    // The one-recipient API always emits a standard frame.
     let frame = dek::seal(
         store,
         config.peer_id,

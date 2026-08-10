@@ -1,30 +1,19 @@
 //! # lunet-paxe
 //!
 //! PAXE datagram encryption for lunet, built as a `cdylib` and loaded at
-//! runtime by the `lunet.paxe` Lua module through the LuaJIT FFI (the same
-//! loading model as `ext/jsonic`). This crate is the Rust replacement for
-//! the deleted `src/paxe.c`; it is a pure opt-in extension and is never
-//! linked into `lunet-run`.
+//! runtime by the `lunet.paxe` Lua module through the LuaJIT FFI. It is a
+//! pure opt-in extension and is never linked into `lunet-run`.
 //!
-//! This crate so far: build plumbing, the libsodium FFI boundary
-//! ([`sodium`], item02), the secure keystore ([`keystore`], item03), the
-//! cryptography-free header/flags codec ([`codec`], item04), standard-mode
-//! seal/open with the single AAD construction point ([`standard`],
-//! item05), DEK-mode seal/open plus the automatic mode-selection layer
-//! ([`dek`], item06), the Lua-facing C ABI ([`lunet_paxe_init`] and
-//! friends, item07) consumed by `paxe.lua` through the LuaJIT FFI, and
-//! the statistics counters plus failure policy ([`stats`], item08) that
-//! are the operator's only diagnostic channel for dropped frames, and the
-//! item09 protected-socket boundary: [`lunet_paxe_frame_for_us`] (the
-//! explicit plaintext gate consumed by the Lua-side UDP wrapper) and
-//! runtime-owned key erasure at process exit (an `atexit` hook
-//! registered by [`lunet_paxe_init`]), and item15b's startup core-dump
-//! suppression ([`lunet_paxe_init`] sets the `RLIMIT_CORE` soft limit to
-//! 0 — the only mechanism that keeps key material out of crash dumps on
-//! macOS — with `LUNET_PAXE_ALLOW_CORE_DUMPS=1` as the documented
-//! debugging opt-out).
+//! The crate contains the libsodium boundary ([`sodium`]), guarded
+//! per-peer key storage ([`keystore`]), total header/flags parsing
+//! ([`codec`]), standard and DEK frame protection ([`standard`], [`dek`]),
+//! opaque rejection statistics ([`stats`]), and the Lua-facing C ABI.
+//! [`lunet_paxe_frame_for_us`] is the protected-socket plaintext and
+//! addressing gate. [`lunet_paxe_init`] registers process-exit key erasure
+//! and disables core dumps by default; `LUNET_PAXE_ALLOW_CORE_DUMPS=1` is
+//! the documented debugging opt-out.
 //!
-//! ## The item07 C ABI
+//! ## The C ABI
 //!
 //! All module state (the keystore, i.e. ALL key material) lives behind
 //! the FFI in thread-local storage; Lua never holds keys except
@@ -48,7 +37,7 @@
 //!   in-crate reason is never written to the last-error buffer: a
 //!   receiver that explains why a forgery failed is a decryption oracle
 //!   (PAXE.md "Failure Handling"). The typed reason is recorded into the
-//!   item08 counters at the reject point, BEFORE the collapse (see
+//!   counters at the reject point, BEFORE the collapse (see
 //!   [`stats`]); it never crosses the FFI.
 //!
 //! ## Dependency policy: zero crates
@@ -56,7 +45,7 @@
 //! This crate has **no** crate dependencies — not even `libc`. All
 //! cryptography and all secure-memory handling comes from libsodium via
 //! hand-written `extern "C"` declarations in [`sodium`], **statically
-//! linked into this cdylib** (owner decision, implemented in `build.rs`):
+//! linked into this cdylib** by `build.rs`:
 //! `sodium_malloc` / `sodium_mlock` / `sodium_memzero` provide guarded,
 //! locked, reliably-zeroed key storage, which is exactly where
 //! sysadmin-injected shared cluster keys belong.
@@ -77,16 +66,14 @@
 //! - Every `extern "C"` entry point validates every pointer and length
 //!   before use.
 //!
-//! This constraint is written here now, while the crate is empty, so the
-//! codec, keystore and AEAD items that follow are designed under it from
-//! their first line rather than having it retrofitted.
+//! All parsing and FFI paths are designed around this totality requirement.
 //!
-//! ## FFI containment (item02, extended in item07)
+//! ## FFI containment
 //!
 //! [`sodium`] is the ONLY module in this crate that may contain an
 //! `extern "C"` block or call libsodium, and the only module with a
 //! module-level `unsafe` allowance (enforced below by
-//! `#![deny(unsafe_code)]`). The item07 exported symbols in THIS file
+//! `#![deny(unsafe_code)]`). The exported symbols in THIS file
 //! carry per-function `#[allow(unsafe_code)]` for the LuaJIT-facing
 //! pointer glue (raw pointer ⇄ slice conversion at the trust boundary) —
 //! the same per-symbol pattern [`lunet_paxe_version`] established. Every
@@ -97,7 +84,7 @@
 //! key/nonce/tag newtypes, slice-derived pointer+length pairs, a startup
 //! ABI size check, CSPRNG-only nonce generation, guarded allocations, and
 //! AES-GCM unavailability as a reportable error. libsodium is statically
-//! linked into this cdylib by `build.rs` (owner decision).
+//! linked into this cdylib by `build.rs`.
 
 // Every module except sodium.rs is plain safe Rust; unsafe is denied here
 // and re-allowed by inner attribute inside sodium.rs alone.
@@ -109,7 +96,7 @@ pub mod keystore;
 pub mod sodium;
 pub mod standard;
 pub mod stats;
-// item12's known-answer vectors exist ONLY in test builds: the whole
+// Known-answer vectors exist ONLY in test builds: the whole
 // module is test code pinned against the #[cfg(test)] deterministic
 // seams, so it is compiled out of every non-test build by construction.
 #[cfg(test)]

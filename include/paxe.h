@@ -41,7 +41,7 @@ extern "C" {
 
 /* Number of u64 counters lunet_paxe_stats writes. Also returned by calling it
  * with out = NULL, which is the supported way to size the buffer. */
-#define PAXE_STATS_FIELDS 14
+#define PAXE_STATS_FIELDS 13
 
 /* ---- Constants, computed by the codec. Never restate these as literals: they
  * are read from the library precisely so they cannot drift. ---------------- */
@@ -86,13 +86,13 @@ int lunet_paxe_keystore_clear(void);
 
 /* ---- Frames ------------------------------------------------------------- */
 
-/* Seal payload for to_id on channel. The mode is chosen by payload size — the
- * caller never selects it — and the epoch is the NEWEST installed for to_id, so
+/* Seal payload for to_id on channel as a standard frame. The epoch is the
+ * NEWEST installed for to_id, so
  * installing a new epoch switches senders to it. channel must fit u16 and must
  * not fall in the reserved system range 1-99; channel 0 is permitted.
  *
- * out must have room for payload_len + the DEK overhead, which is the larger of
- * the two; the frame length actually written goes to *out_len. */
+ * out must have room for payload_len + 37 bytes; the frame length actually
+ * written goes to *out_len. */
 int lunet_paxe_seal(const uint8_t *payload, size_t payload_len,
                     uint32_t to_id, uint32_t channel,
                     uint8_t *out, size_t out_cap, size_t *out_len);

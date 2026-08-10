@@ -1,4 +1,4 @@
-//! Statistics counters and the failure policy (item08).
+//! Statistics counters and the failure policy.
 //!
 //! Because open() deliberately withholds rejection reasons from the caller
 //! (a receiver that explains why a forgery failed is a decryption oracle,
@@ -21,9 +21,8 @@
 //! (a fixed-size array literal — adding a variant without adding it here
 //! fails to compile), and [`RejectReason::line`] (an exhaustive `match` —
 //! adding a variant without a log line fails to compile). There is no
-//! string table and no shared "unrecognised" bucket: the deleted C's
-//! log-once map had both, and the first unrecognised reason suppressed
-//! logging for every *different* subsequent one.
+//! string table or shared "unrecognised" bucket; each enum variant has
+//! its own log-once bit.
 //!
 //! ## The invariant
 //!
@@ -47,16 +46,6 @@
 //!   and rx_total is not taken either. They cannot occur in practice;
 //!   counting them as any real reason would falsify the counters.
 //!
-//! ## No counter for the ChaCha20 wrap
-//!
-//! There is deliberately NO wrap-failure counter: the DEK wrap is a
-//! ChaCha20 stream XOR, which does not authenticate and CANNOT fail — any
-//! 32 bytes XOR to some 32 bytes, and a corrupted wrapped DEK surfaces
-//! later as a payload tag failure ([`RejectReason::AuthFailed`]). The
-//! deleted C error-checked the wrap and attributed its "failure" to
-//! rx_auth_fail, counting a condition that cannot occur. A counter for an
-//! impossible condition is not telemetry, it is a lie waiting to be read.
-//!
 //! ## Delta measurement is the API
 //!
 //! Counters are process-global (single-threaded by construction — the one
@@ -78,7 +67,7 @@
 //! - **verbose**: every drop writes a line. Unbounded by design; the
 //!   operator opted into the firehose.
 //!
-//! Two recorded decisions:
+//! Two policy details matter:
 //!
 //! - **Log-once reset scope.** The memo resets on `lunet_paxe_shutdown`
 //!   (a re-initialised module starts a fresh window) and whenever the
@@ -129,13 +118,13 @@ pub enum RejectReason {
     /// prefix, or a header `toId` (bytes 2-3) that is not the configured
     /// local id — plaintext, foreign-protocol or misaddressed traffic on
     /// a protected socket. Recorded ONLY at the protected-socket boundary
-    /// (`lunet_paxe_frame_for_us`, item09), by an EXPLICIT addressing
+    /// (`lunet_paxe_frame_for_us`), by an EXPLICIT addressing
     /// check that runs before the codec — never by coincidence of the
     /// flags constant-bit gate, which crafted plaintext could pass. This
     /// is the first gate on the socket receive path, so it sorts first.
     Plaintext = 0,
-    /// Fewer bytes than the parse needs: under the 9-byte prefix, or
-    /// under the 83-byte DEK minimum with the DEK bit set.
+    /// Fewer bytes than the parse needs: under the prefix or the reusable-DEK
+    /// minimum frame size.
     TooShort,
     /// Flags constant-bit violation: bit 1 set or bit 2 clear. The
     /// protocol's cheap garbage filter, first check after the length gate.
@@ -151,9 +140,6 @@ pub enum RejectReason {
     /// ROTATION problem — the two ends disagree about which epoch is
     /// live. Counted separately from NoPeer (see above).
     NoEpoch,
-    /// The DEK frame's redundant inner Length field (bytes 65-66)
-    /// disagrees with the header's declared length.
-    DekLenMismatch,
     /// The AES-GCM tag did not verify: wrong key, tampered ciphertext,
     /// tampered AAD, or a wrong DEK from a corrupted wrapped DEK (the
     /// wrap cannot fail on its own — see the module docs).
@@ -179,7 +165,6 @@ impl RejectReason {
         RejectReason::LenMismatch,
         RejectReason::NoPeer,
         RejectReason::NoEpoch,
-        RejectReason::DekLenMismatch,
         RejectReason::AuthFailed,
     ];
 
@@ -193,7 +178,7 @@ impl RejectReason {
     /// `[PAXE] ` prefix that distinguishes policy output from trace-build
     /// output on stderr. An exhaustive match: adding a variant without a
     /// line is a compile error. Carries NO fromId/epoch/sizes — those are
-    /// unverified at rejection time (recorded decision, module docs).
+    /// unverified at rejection time (see the module docs).
     pub const fn line(self) -> &'static str {
         match self {
             RejectReason::Plaintext => "[PAXE] drop: plaintext on a protected socket",
@@ -204,7 +189,6 @@ impl RejectReason {
             }
             RejectReason::NoPeer => "[PAXE] drop: unknown peer",
             RejectReason::NoEpoch => "[PAXE] drop: unknown epoch for known peer",
-            RejectReason::DekLenMismatch => "[PAXE] drop: DEK inner-length disagreement",
             RejectReason::AuthFailed => "[PAXE] drop: authentication failure",
         }
     }
@@ -274,7 +258,7 @@ impl FailPolicy {
 /// Number of u64 fields in the FFI snapshot ([`Stats::fields`]). paxe.lua
 /// probes with a null pointer to size its buffer, and asserts its name
 /// table has exactly this many entries so a drift fails loudly.
-pub const SNAPSHOT_FIELD_COUNT: usize = 14;
+pub const SNAPSHOT_FIELD_COUNT: usize = 13;
 
 /// The process-global cumulative counters. `Copy` so snapshots are plain
 /// values; deltas are measured between two snapshots (module docs: no
@@ -290,11 +274,9 @@ pub struct Stats {
     pub rx_rejects: [u64; RejectReason::COUNT],
     /// Frames successfully sealed.
     pub tx_total: u64,
-    /// Of tx_total, sealed standard (below the 64-byte threshold).
+    /// Of tx_total, sealed standard frames.
     pub tx_standard: u64,
-    /// Of tx_total, sealed DEK (at and above the threshold). The mode
-    /// split is the operationally interesting signal with automatic
-    /// selection: it shows where the bandwidth/overhead balance falls.
+    /// Of tx_total, sealed reusable-DEK frames.
     pub tx_dek: u64,
     /// Seals rejected for an oversized payload (reportable RC_ERR, never
     /// a truncated length field).
@@ -346,7 +328,6 @@ impl Stats {
             self.reject(RejectReason::LenMismatch),
             self.reject(RejectReason::NoPeer),
             self.reject(RejectReason::NoEpoch),
-            self.reject(RejectReason::DekLenMismatch),
             self.reject(RejectReason::AuthFailed),
             self.tx_total,
             self.tx_standard,
@@ -372,9 +353,8 @@ thread_local! {
     /// keystore lifecycle (settable before init, unaffected by clear).
     static POLICY: Cell<FailPolicy> = const { Cell::new(FailPolicy::Silent) };
 
-    /// The log-once memo: one bit per [`RejectReason`]. Reset scope is a
-    /// recorded decision (module docs): on shutdown and on entering the
-    /// log_once policy.
+    /// The log-once memo: one bit per [`RejectReason`]. It resets on
+    /// shutdown and when entering the log_once policy.
     static LOGGED: Cell<u64> = const { Cell::new(0) };
 }
 
@@ -449,7 +429,7 @@ pub fn policy() -> FailPolicy {
 
 /// Select the policy. Entering log_once starts a FRESH window (the memo
 /// resets): re-entering the policy is the operator's "tell me again,
-/// once" knob — recorded decision, module docs.
+/// once" knob described in the module docs.
 pub fn set_policy(p: FailPolicy) {
     POLICY.with(|c| c.set(p));
     if p == FailPolicy::LogOnce {
@@ -461,7 +441,7 @@ pub fn set_policy(p: FailPolicy) {
 /// re-initialised module starts a fresh window) and by set_policy on
 /// entering log_once. The counters are NOT touched — they never reset.
 ///
-/// `try_with`, not `with`: the item09 atexit exit hook can run after the
+/// `try_with`, not `with`: the atexit exit hook can run after the
 /// thread-local has been destroyed (destructor order at process exit is
 /// reverse-registration, and the memo may have been initialised after the
 /// hook was registered). A destroyed memo means there is nothing left to
@@ -531,7 +511,7 @@ mod tests {
             );
         }
         assert!(seen.iter().all(|&s| s), "every counter slot is reachable");
-        assert_eq!(RejectReason::COUNT, 8, "the eight enumerated reasons");
+        assert_eq!(RejectReason::COUNT, 7, "the seven enumerated reasons");
         // The exact lines (the smoke run greps stderr for these).
         assert_eq!(
             RejectReason::Plaintext.line(),
@@ -553,10 +533,6 @@ mod tests {
         assert_eq!(
             RejectReason::NoEpoch.line(),
             "[PAXE] drop: unknown epoch for known peer"
-        );
-        assert_eq!(
-            RejectReason::DekLenMismatch.line(),
-            "[PAXE] drop: DEK inner-length disagreement"
         );
         assert_eq!(
             RejectReason::AuthFailed.line(),
@@ -593,15 +569,15 @@ mod tests {
         let f = s.fields();
         assert_eq!(f.len(), SNAPSHOT_FIELD_COUNT);
         let before = Stats::default();
-        assert_eq!(f[0] - before.rx_total, 9, "rx_total: 1 ok + 8 drops");
+        assert_eq!(f[0] - before.rx_total, 8, "rx_total: 1 ok + 7 drops");
         assert_eq!(f[1] - before.rx_ok, 1, "rx_ok");
         for (i, reason) in RejectReason::ALL.iter().enumerate() {
             assert_eq!(f[2 + i], 1, "reject counter for {reason:?}");
         }
-        assert_eq!(f[10] - before.tx_total, 3, "tx_total");
-        assert_eq!(f[11] - before.tx_standard, 1, "tx_standard");
-        assert_eq!(f[12] - before.tx_dek, 2, "tx_dek");
-        assert_eq!(f[13] - before.tx_oversize, 1, "tx_oversize");
+        assert_eq!(f[9] - before.tx_total, 3, "tx_total");
+        assert_eq!(f[10] - before.tx_standard, 1, "tx_standard");
+        assert_eq!(f[11] - before.tx_dek, 2, "tx_dek");
+        assert_eq!(f[12] - before.tx_oversize, 1, "tx_oversize");
         // THE invariant, over the recording API alone.
         assert_eq!(f[0], f[1] + s.reject_sum(), "rx_total == rx_ok + rejects");
     }
@@ -653,8 +629,7 @@ mod tests {
         assert!(should_log(RejectReason::NoEpoch));
         assert!(!should_log(RejectReason::NoEpoch));
         assert!(!should_log(RejectReason::NoEpoch));
-        // A DIFFERENT reason is not suppressed (the deleted C's shared
-        // unrecognised bucket is designed out: one bit per enum variant).
+        // A different reason is not suppressed: one bit per enum variant.
         assert!(should_log(RejectReason::NoPeer));
         assert!(!should_log(RejectReason::NoPeer));
         // The memo is a bitmask over the enum: exactly these two bits set.

@@ -1,19 +1,12 @@
-//! The header and flags codec (item04): total, cryptography-free parsing
+//! The header and flags codec: total, cryptography-free parsing
 //! and serialisation of the 9-byte frame prefix that leads every PAXE
 //! datagram — the 8-byte header (`fromId | toId | channel | length`,
 //! big-endian) and the 1-byte flags — parsed from attacker-controlled
 //! input before any key is looked up and before any cryptography runs.
 //!
-//! This is the most exposed code in the module: it runs on every
-//! unsolicited datagram, including malformed and hostile ones. It replaces
-//! the part of the deleted `src/paxe.c` that had the most defects in nine
-//! bytes: an invented header layout (`length | flags | reserved | key_id`
-//! instead of `fromId | toId | channel | length`), a "reserved byte" the
-//! protocol does not have, no validation of the flags constant bits (a
-//! `0x00` flags byte — forbidden by the protocol — was accepted), and a
-//! `size_t` length written into two bytes with no bound check, silently
-//! truncating any payload over 65535 into a frame the peer was guaranteed
-//! to reject, with no error to the caller.
+//! This code runs on every unsolicited datagram, including malformed and
+//! hostile ones. It accepts only the documented header layout, validates
+//! the fixed flag bits, and represents the wire length as a bounded `u16`.
 //!
 //! ## Wire layout (PAXE.md is authoritative)
 //!
@@ -28,7 +21,7 @@
 //!
 //! `length` is the length of the plaintext payload, not of the frame on
 //! the wire; the frame is longer by the mode's per-frame overhead (37 or
-//! 83 bytes).
+//! 97 bytes).
 //!
 //! ## Totality: no panic on ANY input (hard requirement)
 //!
@@ -65,17 +58,16 @@
 //! 3. **Field extraction** — infallible big-endian decoding of the four
 //!    u16 header fields plus the mode and epoch bits.
 //!
-//! The order is observable through the item08 statistics counters and
+//! The order is observable through the statistics counters and
 //! through timing, so it is fixed here deliberately.
 //!
 //! ## Type-level guarantees (made impossible, not merely checked)
 //!
 //! - **Length cannot truncate.** [`Header::length`] is a `u16` and the
 //!   encode path takes a `u16`, so a value exceeding 16 bits is
-//!   unrepresentable — the deleted C's silent `size_t`-into-2-bytes
-//!   truncation cannot recur. The payload-size bounds (PAXE.md "Limits":
-//!   65470 standard / 65424 DEK) are enforced by items 05/06 BEFORE a
-//!   `Header` is constructed, against the mode's overhead.
+//!   unrepresentable. The payload-size bounds (PAXE.md "Limits": 65470
+//!   standard / 65410 reusable-DEK) are enforced by the mode implementations before
+//!   a `Header` is constructed.
 //! - **Epoch out of range is unrepresentable.** [`Flags`] reuses the
 //!   keystore's [`Epoch`] newtype, whose only constructor rejects values
 //!   above 31. Serialising shifts the guaranteed-≤31 value into bits 3-7;
@@ -92,18 +84,8 @@
 //! This codec validates ONLY the structural well-formedness of the 9-byte
 //! prefix. It deliberately does NOT compare `length` against the actual
 //! datagram size: the expected frame size depends on the mode's per-frame
-//! overhead (37 or 83 bytes), which is selected by the very flags byte
-//! being parsed, so that check belongs to the mode implementations
-//! (items 05/06). The boundary is stated here so the check is not
-//! accidentally omitted by both sides assuming the other performs it:
-//! **the receiver's length-vs-datagram-size validation lives in items
-//! 05/06, not in this module.**
-
-// Callers land in items 05-07 (seal/open, Lua API). Until then the public
-// surface of this module is exercised only by its unit tests, so dead_code
-// is allowed here on the same terms as keystore.rs: remove the allowance
-// as those items land.
-#![allow(dead_code)]
+//! overhead (37 or 97 bytes), which is selected by the flags byte. The
+//! standard and DEK open paths enforce exact length-versus-frame geometry.
 
 use crate::keystore::Epoch;
 use std::error::Error;
@@ -135,7 +117,7 @@ const FIXED_PATTERN: u8 = 0x04;
 pub enum Mode {
     /// DEK flag 0: payloads below 64 bytes, 37-byte overhead.
     Standard,
-    /// DEK flag 1: payloads of 64 bytes and above, 83-byte overhead.
+    /// Reusable-DEK flag 1: explicit fanout frames, 97-byte overhead.
     Dek,
 }
 
@@ -151,9 +133,8 @@ pub struct Header {
     pub channel: u16,
     /// PLAINTEXT payload length in bytes (wire bytes 6-7, big-endian) —
     /// NOT the frame length. Being a `u16`, a value exceeding 16 bits is
-    /// unrepresentable on encode: the deleted C's silent `size_t`
-    /// truncation cannot recur. Items 05/06 bound the payload against the
-    /// mode's maximum BEFORE constructing a `Header`.
+    /// unrepresentable on encode. The mode implementations bound the
+    /// payload before constructing a `Header`.
     pub length: u16,
 }
 
@@ -253,7 +234,7 @@ impl Flags {
 }
 
 /// Every rejection the codec can report. Kept specific because these
-/// reasons feed the item08 statistics counters (too short, flags
+/// reasons feed the statistics counters (too short, flags
 /// constraint violation). No operation in this module panics —
 /// `panic = "abort"` would kill the LuaJIT host process.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -286,7 +267,7 @@ impl Error for CodecError {}
 
 /// Parse the 9-byte prefix of a datagram: the 8-byte header plus the flags
 /// byte. Extra bytes beyond the prefix (nonce, ciphertext, tag) are left
-/// to items 05/06 and ignored here.
+/// to the mode implementations and ignored here.
 ///
 /// TOTAL: every input maps to `Ok((Header, Flags))` or a specific
 /// [`CodecError`]; no panic, no out-of-bounds index, no arithmetic
@@ -517,7 +498,7 @@ mod tests {
             );
         }
         // A full frame prefix plus mode bytes: the codec parses only the
-        // 9-byte prefix and leaves the rest to items 05/06.
+        // 9-byte prefix and leaves the rest to the mode implementations.
         let mut frame = [0xAAu8; 64];
         let prefix = serialize_prefix(
             &Header {

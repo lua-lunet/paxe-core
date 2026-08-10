@@ -90,7 +90,7 @@ fn locate() -> PathBuf {
         }
         fatal(&format!(
             "PAXE_SODIUM_LIB_DIR points at {}, which does not contain \
-             {archive}. Static linking is a settled decision; refusing to \
+             {archive}. PAXE requires static linking and will not \
              fall back to the shared library.",
             dir.display()
         ));
@@ -171,8 +171,8 @@ fn locate_pkg_config(archive: &str) -> PathBuf {
     }
     fatal(&format!(
         "pkg-config found libsodium but no static archive {archive} in \
-         any of: {search_dirs:?}. Static linking is a settled decision; \
-         refusing to fall back to the shared library. Both libsodium-dev \
+         any of: {search_dirs:?}. PAXE will not fall back to the shared \
+         library. Both libsodium-dev \
          and Homebrew libsodium ship the archive; or set \
          PAXE_SODIUM_LIB_DIR."
     ));
