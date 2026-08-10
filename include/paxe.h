@@ -86,6 +86,10 @@ int lunet_paxe_keystore_clear(void);
 
 /* ---- Frames ------------------------------------------------------------- */
 
+/* This C ABI exposes one-recipient standard sealing only. It has no
+ * reusable-DEK fanout sealer. It can still open a reusable-DEK frame received
+ * from a Rust host, and the reusable-DEK constants above describe that format. */
+
 /* Seal payload for to_id on channel as a standard frame. The epoch is the
  * NEWEST installed for to_id, so
  * installing a new epoch switches senders to it. channel must fit u16 and must

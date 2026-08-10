@@ -276,7 +276,9 @@ pub struct Stats {
     pub tx_total: u64,
     /// Of tx_total, sealed standard frames.
     pub tx_standard: u64,
-    /// Of tx_total, sealed reusable-DEK frames.
+    /// Of tx_total, reusable-DEK frames explicitly recorded by a Rust host
+    /// after it accepts the frames returned by `dek::seal_fanout`. The C ABI
+    /// has no fanout sealer and therefore never advances this counter.
     pub tx_dek: u64,
     /// Seals rejected for an oversized payload (reportable RC_ERR, never
     /// a truncated length field).
@@ -384,7 +386,12 @@ pub fn record_rx_drop() {
     });
 }
 
-/// A frame was sealed: transmit total plus the mode split.
+/// Record a frame accepted for transmission: transmit total plus the mode
+/// split.
+///
+/// The C ABI calls this for each standard frame it seals. Reusable-DEK fanout
+/// is Rust API-only: a Rust host must call this once for each returned fanout
+/// frame it actually accepts for transmission, using [`Mode::Dek`].
 pub fn record_tx_sealed(mode: Mode) {
     bump(|s| {
         s.tx_total = s.tx_total.saturating_add(1);

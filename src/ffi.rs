@@ -169,6 +169,9 @@ pub extern "C" fn lunet_paxe_overhead_standard() -> u32 {
 }
 
 /// Reusable-DEK per-frame overhead in bytes (97), from `dek.rs`.
+///
+/// The C ABI exposes no reusable-DEK fanout sealer; this constant describes
+/// frames a C host may receive from a Rust fanout host.
 #[allow(unsafe_code)]
 #[no_mangle]
 pub extern "C" fn lunet_paxe_overhead_dek() -> u32 {
@@ -183,6 +186,9 @@ pub extern "C" fn lunet_paxe_max_payload_standard() -> u32 {
 }
 
 /// Maximum reusable-DEK plaintext payload (65410), from `dek.rs`.
+///
+/// The C ABI exposes no reusable-DEK fanout sealer; this is the limit for
+/// reusable-DEK frames it may receive.
 #[allow(unsafe_code)]
 #[no_mangle]
 pub extern "C" fn lunet_paxe_max_payload_dek() -> u32 {
@@ -250,15 +256,15 @@ pub extern "C" fn lunet_paxe_init() -> c_int {
 /// poisoning, no panic path.
 static EXIT_HOOK_REGISTERED: AtomicBool = AtomicBool::new(false);
 
-/// The documented debugging opt-out (): when
+/// The documented debugging opt-out: when
 /// `LUNET_PAXE_ALLOW_CORE_DUMPS` is exactly `"1"`, `lunet_paxe_init`
 /// leaves the process's inherited `RLIMIT_CORE` alone so core-dump
 /// debugging sessions (AGENTS.md: `ulimit -c unlimited`, `lldb -c
 /// /cores/core.*`) keep working for a PAXE-loaded host. Any other value —
 /// including `0`, empty or a misspelling — is treated as UNSET, so a
 /// misconfiguration fails safe (cores stay off). Never set this on a
-/// production node: on macOS a crash then writes live key material into
-/// the core file (finding F2).
+/// production node: on macOS a crash can write live key material into a
+/// core file.
 fn core_dumps_allowed_by_env() -> bool {
     std::env::var_os("LUNET_PAXE_ALLOW_CORE_DUMPS").is_some_and(|v| v == "1")
 }
@@ -324,12 +330,12 @@ pub extern "C" fn lunet_paxe_set_local_id(node_id: u32) -> c_int {
 }
 
 /// Shut the module down: drop the keystore — every StoredKey is
-/// `sodium_memzero`'d and `sodium_free`d on the drop () — and clear
+/// `sodium_memzero`'d and `sodium_free`d on drop — and clear
 /// the last-error buffer. Afterwards `set_local_id` may configure afresh.
 /// Safe to call when unconfigured (a no-op).
 ///
 /// Normal process exit needs no script-side call: `lunet_paxe_init`
-/// registers this same state drop as an `atexit` hook (), so the
+/// registers this same state drop as an `atexit` hook, so the
 /// runtime erases keys at exit even when a script forgets.
 #[allow(unsafe_code)]
 #[no_mangle]
@@ -473,8 +479,9 @@ pub extern "C" fn lunet_paxe_keystore_clear() -> c_int {
 // Seal / open.
 // ---------------------------------------------------------------------------
 
-/// Seal `payload` for `to_id` on `channel` as a standard frame. The frame's
-/// `fromId` is the configured local id — never a
+/// Seal `payload` for `to_id` on `channel` as a standard frame. This is the
+/// C ABI's only sealing operation; reusable-DEK fanout is Rust API-only. The
+/// frame's `fromId` is the configured local id — never a
 /// parameter, so no caller can spoof a source. The send epoch is the
 /// NEWEST epoch installed for `to_id` (PAXE.md "Rotation": installing a
 /// new epoch switches senders to it); sealing under a retired/absent key
@@ -543,7 +550,7 @@ pub extern "C" fn lunet_paxe_seal(
         match dek::seal(store, to_id, channel, epoch, payload) {
             Ok(frame) => {
                 if frame.len() > out.len() {
-                    // paxe.lua always supplies payload_len + 97, so a
+                    // paxe.lua supplies payload_len + 37, so a
                     // short buffer here is a loader bug — malformed use.
                     return invalid(format!(
                         "frame output buffer too small: need {}, have {}",
@@ -655,7 +662,7 @@ pub extern "C" fn lunet_paxe_open(
 }
 
 // ---------------------------------------------------------------------------
-// : the protected-socket plaintext gate. Consumed by the Lua-side
+// Protected-socket plaintext gate. Consumed by the Lua-side
 // UDP wrapper (ext/paxe/paxe.lua `protect`) BEFORE `lunet_paxe_open`.
 // ---------------------------------------------------------------------------
 
@@ -722,7 +729,7 @@ pub extern "C" fn lunet_paxe_frame_for_us(frame: *const u8, frame_len: usize) ->
 }
 
 // ---------------------------------------------------------------------------
-// : statistics snapshot and failure policy. The counters are the
+// Statistics snapshot and failure policy. The counters are the
 // operator's ONLY diagnostic channel for dropped frames (open collapses
 // every reason to RC_DROP); they are process-global, cumulative, and
 // never reset by any API — consumers measure deltas between snapshots.
