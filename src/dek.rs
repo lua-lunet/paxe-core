@@ -64,7 +64,6 @@ pub enum SealError {
     NoKey,
     EmptyRecipients,
     DuplicateRecipient(u16),
-    NonceCountMismatch,
     Sodium(SodiumError),
 }
 
@@ -75,7 +74,6 @@ impl fmt::Display for SealError {
             Self::NoKey => write!(f, "no PSK installed for the destination peer"),
             Self::EmptyRecipients => write!(f, "fanout needs at least one recipient"),
             Self::DuplicateRecipient(peer) => write!(f, "duplicate fanout recipient {peer}"),
-            Self::NonceCountMismatch => write!(f, "envelope nonce count does not match recipients"),
             Self::Sodium(e) => write!(f, "libsodium failure: {e}"),
         }
     }
@@ -97,6 +95,9 @@ pub enum OpenError {
     LengthMismatch,
     NoKey,
     AuthFailed,
+    /// The frame is addressed to a different local node. This is an
+    /// internal receive cause; the FFI still collapses it to an opaque drop.
+    WrongDestination,
     StandardRejected,
     Sodium(SodiumError),
 }
@@ -109,6 +110,7 @@ impl fmt::Display for OpenError {
             Self::LengthMismatch => write!(f, "declared length disagrees with frame size"),
             Self::NoKey => write!(f, "no PSK installed for source and epoch"),
             Self::AuthFailed => write!(f, "authentication failed"),
+            Self::WrongDestination => write!(f, "frame addressed to another node"),
             Self::StandardRejected => write!(f, "standard frame rejected"),
             Self::Sodium(e) => write!(f, "libsodium failure: {e}"),
         }
@@ -126,6 +128,10 @@ impl KeyGuard {
 
     fn from_bytes(bytes: [u8; KEYBYTES]) -> Self {
         Self(Key::from_bytes(bytes))
+    }
+
+    fn as_mut_bytes(&mut self) -> &mut [u8; KEYBYTES] {
+        self.0.as_mut_bytes()
     }
 
     fn key(&self) -> &Key {
@@ -154,21 +160,16 @@ fn body_aad(from_id: u16, channel: u16, length: u16) -> [u8; 7] {
     [f0, f1, c0, c1, l0, l1, 0x05]
 }
 
-fn envelope_aad(prefix: &[u8], body_nonce: &[u8], body_tag: &[u8]) -> Result<[u8; 37], SealError> {
-    let prefix: &[u8; PREFIX_LEN] = prefix
-        .try_into()
-        .map_err(|_| SealError::Sodium(SodiumError::Internal))?;
-    let body_nonce: &[u8; NPUBBYTES] = body_nonce
-        .try_into()
-        .map_err(|_| SealError::Sodium(SodiumError::Internal))?;
-    let body_tag: &[u8; ABYTES] = body_tag
-        .try_into()
-        .map_err(|_| SealError::Sodium(SodiumError::Internal))?;
+fn envelope_aad(
+    prefix: &[u8; PREFIX_LEN],
+    body_nonce: &[u8; NPUBBYTES],
+    body_tag: &[u8; ABYTES],
+) -> [u8; 37] {
     let mut aad = [0u8; 37];
     aad[..PREFIX_LEN].copy_from_slice(prefix);
     aad[PREFIX_LEN..PREFIX_LEN + NPUBBYTES].copy_from_slice(body_nonce);
     aad[PREFIX_LEN + NPUBBYTES..].copy_from_slice(body_tag);
-    Ok(aad)
+    aad
 }
 
 /// Seal one recipient with its selected PSK. This always emits a standard
@@ -203,11 +204,11 @@ pub fn seal_fanout(
     channel: u16,
     payload: &[u8],
 ) -> Result<Vec<FanoutFrame>, SealError> {
-    validate_fanout(store, recipients, payload)?;
+    let selected = select_fanout(store, recipients, payload)?;
     let envelope_nonces: Vec<Nonce> = recipients.iter().map(|_| sodium::random_nonce()).collect();
     seal_fanout_core(
-        store,
-        recipients,
+        store.local_id(),
+        selected,
         channel,
         payload,
         KeyGuard::random(),
@@ -216,37 +217,16 @@ pub fn seal_fanout(
     )
 }
 
-fn validate_fanout(store: &KeyStore, recipients: &[u16], payload: &[u8]) -> Result<(), SealError> {
+fn select_fanout<'a>(
+    store: &'a KeyStore,
+    recipients: &[u16],
+    payload: &[u8],
+) -> Result<Vec<(u16, Epoch, &'a StoredKey)>, SealError> {
     if recipients.is_empty() {
         return Err(SealError::EmptyRecipients);
     }
     if payload.len() > DEK_MAX_PAYLOAD {
         return Err(SealError::Oversize(payload.len()));
-    }
-    let mut seen = BTreeSet::new();
-    for &to_id in recipients {
-        if !seen.insert(to_id) {
-            return Err(SealError::DuplicateRecipient(to_id));
-        }
-        if store.key_for_send_current(to_id).is_none() {
-            return Err(SealError::NoKey);
-        }
-    }
-    Ok(())
-}
-
-fn seal_fanout_core(
-    store: &KeyStore,
-    recipients: &[u16],
-    channel: u16,
-    payload: &[u8],
-    dek: KeyGuard,
-    body_nonce: Nonce,
-    envelope_nonces: &[Nonce],
-) -> Result<Vec<FanoutFrame>, SealError> {
-    validate_fanout(store, recipients, payload)?;
-    if envelope_nonces.len() != recipients.len() {
-        return Err(SealError::NonceCountMismatch);
     }
     let mut seen = BTreeSet::new();
     let mut selected = Vec::with_capacity(recipients.len());
@@ -257,8 +237,21 @@ fn seal_fanout_core(
         let (epoch, stored) = store.key_for_send_current(to_id).ok_or(SealError::NoKey)?;
         selected.push((to_id, epoch, stored));
     }
+    Ok(selected)
+}
+
+fn seal_fanout_core(
+    local_id: u16,
+    selected: Vec<(u16, Epoch, &StoredKey)>,
+    channel: u16,
+    payload: &[u8],
+    dek: KeyGuard,
+    body_nonce: Nonce,
+    envelope_nonces: &[Nonce],
+) -> Result<Vec<FanoutFrame>, SealError> {
+    debug_assert_eq!(envelope_nonces.len(), selected.len());
     let length = u16::try_from(payload.len()).map_err(|_| SealError::Oversize(payload.len()))?;
-    let body_aad = body_aad(store.local_id(), channel, length);
+    let body_aad = body_aad(local_id, channel, length);
     let mut body = vec![0u8; NPUBBYTES + payload.len() + ABYTES];
     body[..NPUBBYTES].copy_from_slice(body_nonce.as_bytes());
     sodium::aead_encrypt(
@@ -274,14 +267,20 @@ fn seal_fanout_core(
     let mut frames = Vec::with_capacity(selected.len());
     for ((to_id, epoch, stored), envelope_nonce) in selected.into_iter().zip(envelope_nonces) {
         let header = Header {
-            from_id: store.local_id(),
+            from_id: local_id,
             to_id,
             channel,
             length,
         };
         let flags = Flags::new(Mode::Dek, epoch);
         let prefix = codec::serialize_prefix(&header, &flags);
-        let aad = envelope_aad(&prefix, &body[..NPUBBYTES], body_tag)?;
+        let body_nonce: &[u8; NPUBBYTES] = body[..NPUBBYTES]
+            .try_into()
+            .map_err(|_| SealError::Sodium(SodiumError::Internal))?;
+        let body_tag: &[u8; ABYTES] = body_tag
+            .try_into()
+            .map_err(|_| SealError::Sodium(SodiumError::Internal))?;
+        let aad = envelope_aad(&prefix, body_nonce, body_tag);
         let mut frame = Vec::with_capacity(payload.len() + DEK_OVERHEAD);
         frame.extend_from_slice(&prefix);
         frame.extend_from_slice(envelope_nonce.as_bytes());
@@ -336,9 +335,17 @@ fn open_dek(
         return Err(OpenError::TooShort(frame.len()));
     }
     let declared = header.length as usize;
+    if declared > DEK_MAX_PAYLOAD {
+        stats::record_reject(RejectReason::LenMismatch);
+        return Err(OpenError::LengthMismatch);
+    }
     if frame.len() != declared + DEK_OVERHEAD {
         stats::record_reject(RejectReason::LenMismatch);
         return Err(OpenError::LengthMismatch);
+    }
+    if header.to_id != store.local_id() {
+        stats::record_reject(RejectReason::Plaintext);
+        return Err(OpenError::WrongDestination);
     }
     let stored = match store.key_for_receive(header.from_id, flags.epoch()) {
         Some(value) => value,
@@ -357,28 +364,32 @@ fn open_dek(
     let body_nonce: [u8; NPUBBYTES] = frame[layout::BODY_NONCE..layout::BODY]
         .try_into()
         .map_err(|_| OpenError::Sodium(SodiumError::Internal))?;
-    let body_tag = frame
+    let body_tag: &[u8; ABYTES] = frame
         .get(frame.len() - ABYTES..)
-        .ok_or(OpenError::Sodium(SodiumError::Internal))?;
-    let envelope_aad = envelope_aad(
-        &frame[..PREFIX_LEN],
-        &frame[layout::BODY_NONCE..layout::BODY],
-        body_tag,
-    )
-    .map_err(|e| match e {
-        SealError::Sodium(s) => OpenError::Sodium(s),
-        _ => OpenError::Sodium(SodiumError::Internal),
-    })?;
+        .ok_or(OpenError::Sodium(SodiumError::Internal))?
+        .try_into()
+        .map_err(|_| OpenError::Sodium(SodiumError::Internal))?;
+    let prefix: &[u8; PREFIX_LEN] = frame
+        .get(..PREFIX_LEN)
+        .ok_or(OpenError::Sodium(SodiumError::Internal))?
+        .try_into()
+        .map_err(|_| OpenError::Sodium(SodiumError::Internal))?;
+    let body_nonce_bytes: &[u8; NPUBBYTES] = frame
+        .get(layout::BODY_NONCE..layout::BODY)
+        .ok_or(OpenError::Sodium(SodiumError::Internal))?
+        .try_into()
+        .map_err(|_| OpenError::Sodium(SodiumError::Internal))?;
+    let envelope_aad = envelope_aad(prefix, body_nonce_bytes, body_tag);
     let envelope = frame
         .get(layout::ENCRYPTED_DEK..layout::BODY_NONCE)
         .ok_or(OpenError::Sodium(SodiumError::Internal))?;
-    let mut dek_bytes = [0u8; KEYBYTES];
+    let mut dek = KeyGuard::from_bytes([0; KEYBYTES]);
     match sodium::aead_decrypt(
         psk(stored).map_err(OpenError::Sodium)?,
         &Nonce::from_bytes(envelope_nonce),
         &envelope_aad,
         envelope,
-        &mut dek_bytes,
+        dek.as_mut_bytes(),
     ) {
         Ok(_) => {}
         Err(SodiumError::AuthFailed) => {
@@ -387,7 +398,6 @@ fn open_dek(
         }
         Err(e) => return Err(OpenError::Sodium(e)),
     }
-    let dek = KeyGuard::from_bytes(dek_bytes);
     let mut out = vec![0u8; declared];
     let body = frame
         .get(layout::BODY..)
@@ -426,9 +436,11 @@ pub(crate) fn seal_fanout_deterministic(
         .copied()
         .map(Nonce::from_bytes)
         .collect();
+    let selected = select_fanout(store, recipients, payload)?;
+    assert_eq!(envelope_nonces.len(), selected.len());
     seal_fanout_core(
-        store,
-        recipients,
+        store.local_id(),
+        selected,
         channel,
         payload,
         KeyGuard::from_bytes(dek),
@@ -533,6 +545,82 @@ mod tests {
         assert_eq!(
             seal_fanout(&store, &[B], 1, &vec![0; DEK_MAX_PAYLOAD + 1]),
             Err(SealError::Oversize(DEK_MAX_PAYLOAD + 1))
+        );
+    }
+
+    #[test]
+    fn dek_geometry_covers_boundaries_and_rejects_invalid_lengths() {
+        if !gcm() {
+            return;
+        }
+        let store = sender();
+        for n in [0, 1, 63, 64, 65, 1400, DEK_MAX_PAYLOAD] {
+            let payload = vec![0xA5; n];
+            let frames = seal_fanout(&store, &[B], 1, &payload).expect("fanout");
+            assert_eq!(frames[0].frame.len(), n + DEK_OVERHEAD);
+            let (_, _, opened) =
+                open(&receiver(B, ep(1), [0x11; KEYBYTES]), &frames[0].frame).expect("open");
+            assert_eq!(opened, payload);
+        }
+
+        let prefix = codec::serialize_prefix(
+            &Header {
+                from_id: A,
+                to_id: B,
+                channel: 1,
+                length: 0,
+            },
+            &Flags::new(Mode::Dek, ep(1)),
+        );
+        for len in PREFIX_LEN..DEK_OVERHEAD {
+            let mut truncated = vec![0; len];
+            truncated[..PREFIX_LEN].copy_from_slice(&prefix);
+            assert_eq!(
+                open(&receiver(B, ep(1), [0x11; KEYBYTES]), &truncated),
+                Err(OpenError::TooShort(len)),
+                "{len}-byte DEK frame"
+            );
+        }
+
+        let mut overlarge = vec![0; DEK_MAX_PAYLOAD + 1 + DEK_OVERHEAD];
+        let overlarge_prefix = codec::serialize_prefix(
+            &Header {
+                from_id: A,
+                to_id: B,
+                channel: 1,
+                length: (DEK_MAX_PAYLOAD + 1) as u16,
+            },
+            &Flags::new(Mode::Dek, ep(1)),
+        );
+        overlarge[..PREFIX_LEN].copy_from_slice(&overlarge_prefix);
+        assert_eq!(
+            open(&receiver(B, ep(1), [0x11; KEYBYTES]), &overlarge),
+            Err(OpenError::LengthMismatch)
+        );
+    }
+
+    #[test]
+    fn shared_psk_does_not_override_destination_addressing() {
+        if !gcm() {
+            return;
+        }
+        let shared = [0x42; KEYBYTES];
+        let mut source = KeyStore::new(A).expect("source");
+        source.install(B, ep(1), &shared).expect("B");
+        source.install(C, ep(1), &shared).expect("C");
+        let receiver_b = receiver(B, ep(1), shared);
+
+        let standard = seal(&source, C, 1, ep(1), b"standard").expect("seal");
+        let mut out = vec![0; 8];
+        assert_eq!(
+            standard::open(&receiver_b, &standard, &mut out),
+            Err(standard::OpenError::Rejected)
+        );
+
+        let dek = seal_fanout(&source, &[C], 1, b"fanout").expect("fanout");
+        assert_eq!(
+            open(&receiver_b, &dek[0].frame),
+            Err(OpenError::WrongDestination)
         );
     }
 

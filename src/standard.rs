@@ -349,6 +349,14 @@ pub fn open(
         }
     };
 
+    // A shared cluster PSK can decrypt traffic for any provisioned peer, so
+    // destination addressing is a mandatory receive gate, not merely a
+    // socket-side filtering optimisation.
+    if header.to_id != store.local_id() {
+        stats::record_reject(RejectReason::Plaintext);
+        return Err(OpenError::Rejected);
+    }
+
     // Standard mode only: a DEK frame (bit 0 set) is not malformed, but it
     // is not for THIS function — the public dispatch routes it to the DEK
     // open, so in production this arm never fires. It is mode ROUTING, not
