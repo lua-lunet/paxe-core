@@ -12,3 +12,11 @@ to.
 Do not use `git reset`, `git stash`, `git rm`, `rm`, or another operation that
 might delete work from the user or other agents. When a soft deletion is
 needed, move the target to the repository's gitignored `.tmp/` directory.
+
+## Current-State Documentation
+
+Do not leave issue numbers, pull-request numbers, build-plan item numbers, or
+other session-local identifiers in source comments, documentation, tests, test
+data, or workflow comments. Describe only the current behavior, contract, and
+material rationale. Git history, issues, and pull requests record how the code
+arrived there.

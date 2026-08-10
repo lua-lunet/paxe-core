@@ -1,16 +1,13 @@
-//! Standard-mode seal and open (item05): the 37-byte-overhead frame
+//! Standard-mode seal and open: the 37-byte-overhead frame
 //!
 //! ```text
 //! Header(8) ‖ Flags(1) ‖ Nonce(12) ‖ Ciphertext(N) ‖ Tag(16)
 //! ```
 //!
 //! Total frame size is exactly `N + 37`; the AAD is the 9-byte prefix
-//! (header followed by the flags byte). This is a MATCHED pair over the
-//! typed header/flags of item04, the guarded keys of item03 and the AEAD
-//! wrappers of item02 — the property the deleted C never had, because its
-//! decrypt half had no callers: a matched encoder and decoder agree with
-//! each other regardless of whether what they agree on is correct. The
-//! tests in this module are therefore weighted towards the properties a
+//! (header followed by the flags byte). The implementation uses the typed
+//! prefix codec, guarded keystore, and safe AEAD wrappers. Tests emphasize
+//! properties a
 //! self-round-trip CANNOT establish: that the AAD really covers all 9
 //! bytes (tamper tests under identical key material), that the length
 //! field is validated against the actual datagram size on both sides, and
@@ -28,27 +25,24 @@
 //! direction built its own AAD slice, a divergence (e.g. an 8-byte AAD
 //! that drops the flags byte — and with it the epoch and the DEK/mode bit)
 //! would be possible and every round-trip test would still pass; with one
-//! shared borrow it is not. DEK mode (item06) reuses this same function.
+//! shared borrow it is not. DEK mode reuses this same function.
 //!
 //! ## Length validation is two-sided, and both sides are here
 //!
-//! item04 deliberately does not check `length` against the datagram size,
+//! The prefix codec deliberately does not check `length` against the datagram size,
 //! because the expected size depends on the mode's overhead. That check
 //! lives here for standard mode:
 //!
 //! - **Seal**: the payload must fit [`MAX_PAYLOAD`] (65507 − 37 = 65470,
 //!   PAXE.md "Limits"). An oversized payload is a REPORTABLE error —
-//!   never a truncated length field. A truncated length produces a frame
-//!   the peer is guaranteed to reject with no error surfaced to the
-//!   caller; an earlier implementation did exactly that and PAXE.md names
-//!   it a debugging trap.
+//!   never a truncated length field.
 //! - **Open**: the frame's actual size must equal the declared length +
 //!   37 EXACTLY, checked BEFORE the AEAD call, because the declared length
 //!   determines the ciphertext slice bounds.
 //!
 //! ## Key selection: `toId` on seal, `fromId` on open
 //!
-//! Per item03's addressing model, send seals with the key shared with the
+//! Under the keystore addressing model, send seals with the key shared with the
 //! DESTINATION and receive opens with the key shared with the SOURCE —
 //! `key_for_send(to_id)` / `key_for_receive(from_id)`. The epoch is the
 //! caller's configured send epoch on seal and the wire epoch (flags bits
@@ -59,7 +53,7 @@
 //! loopback traffic, so the test uses two distinct node ids with decoy
 //! keys under each node's own id.
 //!
-//! ## Nonces: CSPRNG only — recorded so a counter is never proposed
+//! ## Nonces: CSPRNG only
 //!
 //! AES-GCM nonce reuse under the same key is CATASTROPHIC: the XOR of the
 //! two plaintexts leaks and the GCM authentication key becomes
@@ -67,7 +61,7 @@
 //! messages. Per-link keys make this matter MORE, not less: one link
 //! carries many frames under one key, so a repeated nonce on that link is
 //! a real exposure. Every nonce here comes from [`sodium::random_nonce`]
-//! (the item02 CSPRNG wrapper) and from nowhere else — there is no code
+//! (the CSPRNG wrapper) and from nowhere else — there is no code
 //! path that derives a nonce from a counter, a timestamp, or the payload.
 //! Twelve fresh random bytes per frame is what the protocol specifies; the
 //! birthday bound on a 96-bit random nonce (collision probability reaches
@@ -77,25 +71,17 @@
 //! restart, a reinstall or a second sender — guarantees this design does
 //! not have.
 //!
-//! ## Decision: separate-output decryption, NOT in place
+//! ## Separate-output decryption
 //!
-//! The deleted C decrypted in place at the ciphertext offset and then
-//! `memmove`d the plaintext down to offset 0 — source and destination
-//! overlapped for payloads larger than the overhead and did not below it,
-//! a classic off-by-one home. This module decrypts into a SEPARATE
-//! caller-supplied output buffer, on the merits:
+//! This module decrypts into a separate caller-supplied output buffer:
 //!
 //! - **Failure cannot destroy the input.** The frame is borrowed
 //!   immutably: after a tag failure the received datagram is byte-for-byte
 //!   intact, and the sodium wrapper wipes the would-be plaintext region of
 //!   the output buffer, so unverified plaintext can never escape and no
 //!   live buffer is clobbered by a forgery.
-//! - **No overlap boundary exists.** There is no relocation, so there is
-//!   no payload size at which source and destination begin to overlap; the
-//!   boundary the deleted C had to get right simply does not arise. The
-//!   spec's conditional requirement (explicit overlap-boundary tests IF
-//!   in-place is chosen) therefore does not apply — the round-trip tests
-//!   still straddle payload sizes 36/37/38.
+//! - **No overlap boundary exists.** There is no relocation and therefore
+//!   no payload size at which source and destination begin to overlap.
 //! - **The copy is not the bottleneck.** Frames are datagram-sized (at
 //!   most 65507 bytes, usually far less); the AES-GCM pass dominates the
 //!   memmove an in-place scheme would save.
@@ -107,36 +93,18 @@
 //! short, bad flags, wrong mode, size mismatch, unknown key, tag failure,
 //! short output buffer — returns the SAME opaque
 //! [`OpenError::Rejected`]; the reason is deliberately unrepresentable to
-//! the caller and will be visible only in the item08 statistics counters.
+//! the caller and will be visible only in the statistics counters.
 //! [`seal`] is different BY DESIGN: its failures are local (oversized
 //! payload, short output buffer, no key installed for the destination) —
 //! reportable configuration/usage errors, not wire rejections, so they
 //! keep distinct typed variants.
 //!
-//! ## Boundary with item06
+//! ## Boundary with DEK mode
 //!
 //! This module is standard mode ONLY. Seal always emits flags with the
 //! DEK bit 0; open rejects any frame whose DEK bit is set. Choosing the
-//! mode by payload size (the 64-byte threshold) and routing incoming
-//! frames to the right open is item06's dispatch layer — deliberately not
-//! here.
-//!
-//! ## Deviation (recorded per the item05 brief)
-//!
-//! sodium.rs gained ONE minimal additive exposure: [`sodium::Key`]'s
-//! `from_borrowed` constructor (plus the `repr(transparent)` that makes it
-//! sound). The keystore's `StoredKey` exposes material only as a borrowed
-//! `&[u8]`, while the AEAD wrappers take `&Key`; without a borrowing
-//! constructor the only bridge is an owned `Key::from_bytes` — a 32-byte
-//! unguarded stack copy of the link key on every datagram, which is
-//! exactly the leak the keystore's type discipline exists to prevent. No
-//! existing item02/03/04 behaviour was changed.
-
-// Callers land in items 06/07 (DEK mode, Lua API). Until then the public
-// surface of this module is exercised only by its unit tests, so dead_code
-// is allowed here on the same terms as codec.rs: remove the allowance as
-// those items land.
-#![allow(dead_code)]
+//! frames to the right open is the reusable-DEK dispatch layer — deliberately
+//! not here.
 
 use crate::codec::{self, Flags, Header, Mode, PREFIX_LEN};
 use crate::keystore::{Epoch, KeyStore};
@@ -158,7 +126,7 @@ pub const MAX_UDP_DATAGRAM: usize = 65507;
 pub const MAX_PAYLOAD: usize = MAX_UDP_DATAGRAM - OVERHEAD;
 
 /// THE single AAD construction point for both directions — and, via
-/// `pub(crate)`, for DEK mode (item06). The AAD is a borrow of the frame's
+/// `pub(crate)`, for DEK mode. The AAD is a borrow of the frame's
 /// first [`PREFIX_LEN`] bytes: the 8-byte header followed by the flags
 /// byte. Returns `None` for a frame shorter than the prefix; both callers
 /// have excluded that case before calling (seal builds at least the
@@ -221,7 +189,7 @@ impl From<SodiumError> for SealError {
 /// The ONLY outcome a rejected frame can produce (module docs: oracle
 /// avoidance). Deliberately a single variant — bad flags, length mismatch,
 /// unknown key and tag failure are indistinguishable to the caller. The
-/// typed reasons are not lost, though: each is recorded into the item08
+/// typed reasons are not lost, though: each is recorded into the
 /// statistics counters AT the reject point below, before this opaque
 /// variant is returned — exactly the consumption the single-variant
 /// design anticipated.
@@ -245,7 +213,7 @@ impl Error for OpenError {}
 /// size — exactly `payload.len() + 37`.
 ///
 /// The frame is addressed `local_id → to_id` on `channel`, sealed with the
-/// key installed for `(to_id, epoch)` (SEND selection, item03). The nonce
+/// key installed for `(to_id, epoch)` (send selection). The nonce
 /// is fresh from the CSPRNG (module docs: never a counter, timestamp or
 /// payload derivative). The AAD is a borrow of the frame's own 9-byte
 /// prefix via [`frame_aad`], the single construction point shared with
@@ -275,10 +243,10 @@ pub fn seal(
 
 /// The deterministic core of standard seal. Production reaches it only
 /// via [`seal`] (the CSPRNG draw above); the `#[cfg(test)]` seam below
-/// reaches it with a supplied nonce for item12's known-answer vectors.
+/// reaches it with a supplied nonce for known-answer vectors.
 /// Randomness is a parameter precisely so the production path has exactly
 /// one randomness source and the test path is compiled out of every
-/// non-test build — the same discipline item06's `seal_dek_core`
+/// non-test build — the same discipline `seal_dek_core`
 /// established for DEK mode.
 fn seal_core(
     store: &KeyStore,
@@ -322,8 +290,7 @@ fn seal_core(
         channel,
         length: payload.len() as u16,
     };
-    // Standard mode only: the DEK bit is always 0. Mode dispatch by
-    // payload size is item06's layer, not this module.
+    // Standard mode only: the DEK bit is always 0.
     let flags = Flags::new(Mode::Standard, epoch);
 
     // Split `out` into the frame's three regions. Both split points are
@@ -351,17 +318,16 @@ fn seal_core(
 }
 
 /// Open a standard-mode `frame`, writing the recovered payload into `out`
-/// and returning the parsed header, the validated flags (item07 needs the
-/// mode and epoch) and the payload length.
+/// and returning the parsed header, validated flags, and payload length.
 ///
 /// Rejections are checked cheapest-first — prefix parse (short input, then
 /// the flags constant-bit garbage filter), standard-mode gate, declared
 /// length vs actual size (BEFORE the AEAD call: it fixes the ciphertext
 /// slice bounds), key lookup by `(from_id, wire epoch)` (RECEIVE
-/// selection, item03) — and every one of them returns the SAME opaque
+/// selection) — and every one of them returns the SAME opaque
 /// [`OpenError::Rejected`] (module docs: oracle avoidance).
 ///
-/// Decryption is SEPARATE-OUTPUT (module docs: the recorded decision):
+/// Decryption uses a separate output buffer:
 /// `frame` is borrowed immutably and is intact after any failure, and on
 /// tag failure the sodium wrapper wipes the would-be plaintext region of
 /// `out`. A too-small `out` surfaces from the wrapper as InvalidLength and
@@ -373,7 +339,7 @@ pub fn open(
 ) -> Result<(Header, Flags, usize), OpenError> {
     // Prefix parse: TooShort and the flags constant-bit garbage filter
     // (before any keystore access — the Epoch only exists after this).
-    // The typed cause is recorded into the item08 counters HERE, at the
+    // The typed cause is recorded into the counters HERE, at the
     // reject point; the caller still gets the one opaque variant.
     let (header, flags) = match codec::parse_prefix(frame) {
         Ok(hf) => hf,
@@ -383,18 +349,26 @@ pub fn open(
         }
     };
 
+    // A shared cluster PSK can decrypt traffic for any provisioned peer, so
+    // destination addressing is a mandatory receive gate, not merely a
+    // socket-side filtering optimisation.
+    if header.to_id != store.local_id() {
+        stats::record_reject(RejectReason::Plaintext);
+        return Err(OpenError::Rejected);
+    }
+
     // Standard mode only: a DEK frame (bit 0 set) is not malformed, but it
-    // is not for THIS function — item06's dispatch routes it to the DEK
+    // is not for THIS function — the public dispatch routes it to the DEK
     // open, so in production this arm never fires. It is mode ROUTING, not
     // a wire rejection: the frame is valid for the other parser, and the
-    // item08 enum deliberately has no variant for it. Uncounted.
+    // enum deliberately has no variant for it. Uncounted.
     if flags.mode() != Mode::Standard {
         return Err(OpenError::Rejected);
     }
 
     // Declared-vs-actual size gate, BEFORE the AEAD call: the declared
     // length fixes the ciphertext slice bounds, so it must be validated
-    // first (item04 deliberately leaves this check to the mode layer).
+    // first (the prefix codec leaves this check to the mode layer).
     // EXACT equality: a frame that claims a length inconsistent with its
     // own size is rejected. u16 + 37 <= 65572, so no overflow is possible.
     let declared = header.length as usize;
@@ -406,8 +380,8 @@ pub fn open(
     // RECEIVE key selection is by fromId and the wire epoch (module
     // docs): we open with the key we share with the claimed source. The
     // AAD binds fromId into the tag, so a forged fromId fails
-    // authentication against that key. A miss is classified for item08
-    // HERE, where the store is in scope: a peer with no entries at all is
+    // authentication against that key. A miss is classified HERE, where
+    // the store is in scope: a peer with no entries at all is
     // a topology problem (NoPeer), a peer holding other epochs is a
     // rotation problem (NoEpoch) — counted separately by design.
     let stored = match store.key_for_receive(header.from_id, flags.epoch()) {
@@ -466,12 +440,12 @@ pub fn open(
 // GCM authentication key becomes recoverable), and per-link keys mean one
 // link carries many frames under one key, so a caller-controllable nonce
 // would be a live exploit primitive, not a convenience. This seam exists
-// for item12's known-answer vectors and nothing else; item06's
+// for known-answer vectors and nothing else;
 // `seal_dek_deterministic` is the DEK-mode twin.
 // ---------------------------------------------------------------------------
 
 /// Standard seal with a supplied nonce, returning the complete frame.
-/// TEST-ONLY known-answer seam for item12: pins the header, flags, AAD
+/// TEST-ONLY known-answer seam: pins the header, flags, AAD
 /// span and frame geometry byte-for-byte against fixed inputs. Reaches
 /// the identical [`seal_core`] the production path uses — the only
 /// difference is where the nonce comes from.
@@ -584,11 +558,8 @@ mod tests {
             return;
         }
         let ks = loopback_store(0x11);
-        // Lengths: 0 and 1 (degenerate); 35/36/37/38 straddling the
-        // deleted C's 36-byte in-place overlap boundary from BOTH sides
-        // (the Rust design is separate-output, so no such boundary exists
-        // by construction — the straddle pins that decision); 1400 (a
-        // typical full datagram). Patterns: embedded NULs and high bytes
+        // Lengths: 0 and 1 (degenerate); 35/36/37/38 around the frame
+        // overhead; 1400 (a typical full datagram). Patterns: embedded NULs and high bytes
         // (ascending), all-zero, all-0xFF, all-0xDE, and a fixed-seed
         // pseudo-random fill.
         for &n in &[0usize, 1, 35, 36, 37, 38, 1400] {
@@ -662,7 +633,7 @@ mod tests {
         if !gcm_or_skip() {
             return;
         }
-        // THE critical test (spec item05): the SAME 32-byte key material is
+        // The same 32-byte key material is
         // installed for two different fromId values. Relabelling the sealed
         // frame's fromId to the other id leaves the key lookup SUCCEEDING,
         // so rejection can only come from the tag covering the fromId
@@ -764,7 +735,7 @@ mod tests {
         let mut t = frame.clone();
         t[8] = Flags::new(Mode::Standard, ep(1)).to_byte();
         assert_rejected(&t);
-        // DEK bit set: rejected by the mode gate (item06's frame).
+        // DEK bit set: rejected by the standard-mode gate.
         let mut t = frame.clone();
         t[8] = Flags::new(Mode::Dek, ep(5)).to_byte();
         assert_rejected(&t);
@@ -815,9 +786,8 @@ mod tests {
             seal(&ks, LOCAL, 100, ep(3), &over, &mut scratch),
             Err(SealError::PayloadTooLarge(MAX_PAYLOAD + 1))
         );
-        // ...and so are values that would VISIBLY truncate a u16 length
-        // field (70000 -> 4464): the deleted C's silent debugging trap.
-        // Nothing is written on the error path.
+        // Values that would truncate a u16 length field (70000 -> 4464)
+        // are also rejected without writing output.
         let big = vec![0u8; 70000];
         assert_eq!(
             seal(&ks, LOCAL, 100, ep(3), &big, &mut scratch),
@@ -862,7 +832,7 @@ mod tests {
     }
 
     #[test]
-    fn open_rejects_dek_mode_frames_mode_dispatch_is_item06() {
+    fn open_rejects_dek_mode_frames_for_dispatch_layer() {
         if !gcm_or_skip() {
             return;
         }
@@ -870,7 +840,7 @@ mod tests {
         // A structurally valid DEK-mode prefix: valid constant bits, DEK
         // bit set, declared length consistent with the frame size — so the
         // rejection here comes from the standard-mode gate, not the parse
-        // or size gates. Routing it to the DEK open is item06.
+        // or size gates. The public dispatch routes it to DEK open.
         let header = Header {
             from_id: LOCAL,
             to_id: LOCAL,

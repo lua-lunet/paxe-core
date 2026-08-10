@@ -26,7 +26,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 thread_local! {
     /// THE keystore. `None` until `set_local_id` configures the node
     /// identity, and again after `shutdown`. `KeyStore` is `!Send`/
-    /// `!Sync` (item03), matching the single-VM-thread call model.
+    /// `!Sync`, matching the single-VM-thread call model.
     static STORE: RefCell<Option<keystore::KeyStore>> = const { RefCell::new(None) };
 
     /// The last RC_ERR / RC_INVAL message. Read via
@@ -52,7 +52,7 @@ const RC_INVAL: c_int = -2;
 /// keystore): the typed in-crate [`dek::OpenError`] reason is dropped
 /// right here and NEVER written to the last-error buffer, because a
 /// receiver that explains why a forgery failed is a decryption oracle
-/// (PAXE.md "Failure Handling"). The reason is recorded into the item08
+/// (PAXE.md "Failure Handling"). The reason is recorded into the
 /// counters at the reject point inside dek/standard, BEFORE this collapse
 /// — the counters are the one place reasons survive.
 const RC_DROP: c_int = -3;
@@ -157,8 +157,7 @@ fn buf_out<'a>(ptr: *mut u8, cap: usize, what: &str) -> Result<&'a mut [u8], Str
 
 // ---------------------------------------------------------------------------
 // Constants — exported from the SAME values the codec/standard/dek layers
-// compute with, never restated as literals in paxe.lua (the deleted C
-// hard-coded 36/82 in a #define and in the docs; both were wrong).
+// compute with, never restated as literals in paxe.lua.
 // ---------------------------------------------------------------------------
 
 /// Standard-mode per-frame overhead in bytes (37), from `standard.rs`.
@@ -169,7 +168,10 @@ pub extern "C" fn lunet_paxe_overhead_standard() -> u32 {
     standard::OVERHEAD as u32
 }
 
-/// DEK-mode per-frame overhead in bytes (83), from `dek.rs`.
+/// Reusable-DEK per-frame overhead in bytes (97), from `dek.rs`.
+///
+/// The C ABI exposes no reusable-DEK fanout sealer; this constant describes
+/// frames a C host may receive from a Rust fanout host.
 #[allow(unsafe_code)]
 #[no_mangle]
 pub extern "C" fn lunet_paxe_overhead_dek() -> u32 {
@@ -183,7 +185,10 @@ pub extern "C" fn lunet_paxe_max_payload_standard() -> u32 {
     standard::MAX_PAYLOAD as u32
 }
 
-/// Maximum DEK-mode plaintext payload (65424), from `dek.rs`.
+/// Maximum reusable-DEK plaintext payload (65410), from `dek.rs`.
+///
+/// The C ABI exposes no reusable-DEK fanout sealer; this is the limit for
+/// reusable-DEK frames it may receive.
 #[allow(unsafe_code)]
 #[no_mangle]
 pub extern "C" fn lunet_paxe_max_payload_dek() -> u32 {
@@ -200,12 +205,12 @@ pub extern "C" fn lunet_paxe_max_payload_dek() -> u32 {
 /// (environment property) — never a panic, never a silent fallback to
 /// another cipher.
 ///
-/// item15b: the FIRST act disables core dumps for the process
+/// The first act disables core dumps for the process
 /// (`RLIMIT_CORE` soft limit 0), before any key material can exist. On
 /// Linux the keystore's mlocked pages were already excluded from cores
-/// via `MADV_DONTDUMP` (item15 verified against a real post-abort core);
+/// via `MADV_DONTDUMP` (verified against a real post-abort core);
 /// on macOS they were NOT — Darwin has no `MADV_DONTDUMP`, `mlock`
-/// excludes nothing, and item15 recovered a full key from dumpable
+/// excludes nothing, and recovered a full key from dumpable
 /// post-abort memory. `RLIMIT_CORE` 0 is the only mechanism that covers
 /// Darwin and it is uniform across platforms: after it, the kernel
 /// writes no core at all. The suppression is process-wide, which is
@@ -237,7 +242,7 @@ pub extern "C" fn lunet_paxe_init() -> c_int {
             sodium::version_string()
         ));
     }
-    // item09: key erasure at process exit is owned by the RUNTIME, not by
+    // Key erasure at process exit is owned by the runtime, not by
     // a script remembering to call shutdown(). Register the exit hook
     // exactly once; the hook runs shutdown_state() at normal termination
     // (see its contract in sodium.rs — best-effort, never fatal).
@@ -251,15 +256,15 @@ pub extern "C" fn lunet_paxe_init() -> c_int {
 /// poisoning, no panic path.
 static EXIT_HOOK_REGISTERED: AtomicBool = AtomicBool::new(false);
 
-/// The documented debugging opt-out (item15b): when
+/// The documented debugging opt-out: when
 /// `LUNET_PAXE_ALLOW_CORE_DUMPS` is exactly `"1"`, `lunet_paxe_init`
 /// leaves the process's inherited `RLIMIT_CORE` alone so core-dump
 /// debugging sessions (AGENTS.md: `ulimit -c unlimited`, `lldb -c
 /// /cores/core.*`) keep working for a PAXE-loaded host. Any other value —
 /// including `0`, empty or a misspelling — is treated as UNSET, so a
 /// misconfiguration fails safe (cores stay off). Never set this on a
-/// production node: on macOS a crash then writes live key material into
-/// the core file (item15 finding F2).
+/// production node: on macOS a crash can write live key material into a
+/// core file.
 fn core_dumps_allowed_by_env() -> bool {
     std::env::var_os("LUNET_PAXE_ALLOW_CORE_DUMPS").is_some_and(|v| v == "1")
 }
@@ -325,12 +330,12 @@ pub extern "C" fn lunet_paxe_set_local_id(node_id: u32) -> c_int {
 }
 
 /// Shut the module down: drop the keystore — every StoredKey is
-/// `sodium_memzero`'d and `sodium_free`d on the drop (item03) — and clear
+/// `sodium_memzero`'d and `sodium_free`d on drop — and clear
 /// the last-error buffer. Afterwards `set_local_id` may configure afresh.
 /// Safe to call when unconfigured (a no-op).
 ///
 /// Normal process exit needs no script-side call: `lunet_paxe_init`
-/// registers this same state drop as an `atexit` hook (item09), so the
+/// registers this same state drop as an `atexit` hook, so the
 /// runtime erases keys at exit even when a script forgets.
 #[allow(unsafe_code)]
 #[no_mangle]
@@ -339,7 +344,7 @@ pub extern "C" fn lunet_paxe_shutdown() {
 }
 
 /// The shared shutdown body, used by the exported shutdown AND by the
-/// item09 `atexit` exit hook. Every thread-local access is `try_with`:
+/// `atexit` exit hook. Every thread-local access is `try_with`:
 /// at process exit the hook can run AFTER a thread-local's destructor
 /// (destructors run in reverse registration order, and a thread-local
 /// first touched after `init` registered the hook is destroyed before
@@ -360,8 +365,8 @@ fn shutdown_state() {
             e.clear();
         }
     });
-    // A re-initialised module starts a fresh log-once window (the
-    // recorded reset scope). The counters themselves are NOT reset —
+    // A re-initialised module starts a fresh log-once window. The counters
+    // themselves are NOT reset —
     // they are cumulative for the process lifetime so monitoring deltas
     // never go negative across a restart. (try_with inside, same reason.)
     stats::reset_log_once_memo();
@@ -474,17 +479,17 @@ pub extern "C" fn lunet_paxe_keystore_clear() -> c_int {
 // Seal / open.
 // ---------------------------------------------------------------------------
 
-/// Seal `payload` for `to_id` on `channel`, choosing the frame mode by
-/// payload size ([`dek::select_mode`]: standard below 64 bytes, DEK at
-/// and above). The frame's `fromId` is the configured local id — never a
+/// Seal `payload` for `to_id` on `channel` as a standard frame. This is the
+/// C ABI's only sealing operation; reusable-DEK fanout is Rust API-only. The
+/// frame's `fromId` is the configured local id — never a
 /// parameter, so no caller can spoof a source. The send epoch is the
 /// NEWEST epoch installed for `to_id` (PAXE.md "Rotation": installing a
 /// new epoch switches senders to it); sealing under a retired/absent key
 /// is therefore impossible by construction.
 ///
-/// `out` must hold at least `payload_len + 83` bytes (paxe.lua allocates
-/// exactly that); the frame size is written to `out_len`. An oversized
-/// payload is an OPERATIONAL failure naming the selected mode's maximum
+/// `out` must hold at least `payload_len + 37` bytes; the frame size is written
+/// to `out_len`. An oversized payload is an operational failure naming the
+/// standard-mode maximum
 /// — never a truncated length field (PAXE.md "Limits").
 #[allow(unsafe_code)]
 #[no_mangle]
@@ -516,22 +521,12 @@ pub extern "C" fn lunet_paxe_seal(
         Ok(v) => v,
         Err(m) => return invalid(m),
     };
-    // Payload bound against the SELECTED mode's maximum. Below the
-    // 64-byte threshold the standard maximum applies; at and above it,
-    // the DEK maximum — so a 65425..65470-byte offer fails against DEK's
-    // 65424, naming the mode and the number.
-    let mode = dek::select_mode(payload.len());
-    let (mode_name, max) = match mode {
-        codec::Mode::Standard => ("standard", standard::MAX_PAYLOAD),
-        codec::Mode::Dek => ("DEK", dek::DEK_MAX_PAYLOAD),
-    };
-    if payload.len() > max {
-        // The one transmit-side rejection the counters track (item08):
-        // oversized offers. Reported, counted, never truncated.
+    if payload.len() > standard::MAX_PAYLOAD {
         stats::record_tx_oversize();
         return fail(&format!(
-            "payload too large: {} bytes exceeds the {mode_name}-mode maximum of {max}",
-            payload.len()
+            "payload too large: {} bytes exceeds the standard-mode maximum of {}",
+            payload.len(),
+            standard::MAX_PAYLOAD
         ));
     }
     STORE.with(|s| {
@@ -555,7 +550,7 @@ pub extern "C" fn lunet_paxe_seal(
         match dek::seal(store, to_id, channel, epoch, payload) {
             Ok(frame) => {
                 if frame.len() > out.len() {
-                    // paxe.lua always supplies payload_len + 83, so a
+                    // paxe.lua supplies payload_len + 37, so a
                     // short buffer here is a loader bug — malformed use.
                     return invalid(format!(
                         "frame output buffer too small: need {}, have {}",
@@ -567,9 +562,7 @@ pub extern "C" fn lunet_paxe_seal(
                 out[..frame.len()].copy_from_slice(&frame);
                 // SAFETY: non-null checked at entry; single u32 write.
                 unsafe { *out_len = frame.len() };
-                // Transmit counters: frames sealed, split by the mode the
-                // ONE selection point chose (item08).
-                stats::record_tx_sealed(mode);
+                stats::record_tx_sealed(codec::Mode::Standard);
                 RC_OK
             }
             Err(e) => fail(&format!("seal failed: {e}")),
@@ -621,7 +614,7 @@ pub extern "C" fn lunet_paxe_open(
             // An unconfigured receiver drops like any other failure:
             // "not configured" reveals nothing about the frame, and one
             // outcome keeps the surface uniform. NOT counted in the
-            // item08 counters: the module is not running PAXE at all, and
+            // counters: the module is not running PAXE at all, and
             // the rx invariant is defined over frames presented to a
             // configured receiver (stats.rs module docs).
             None => return RC_DROP,
@@ -669,7 +662,7 @@ pub extern "C" fn lunet_paxe_open(
 }
 
 // ---------------------------------------------------------------------------
-// item09: the protected-socket plaintext gate. Consumed by the Lua-side
+// Protected-socket plaintext gate. Consumed by the Lua-side
 // UDP wrapper (ext/paxe/paxe.lua `protect`) BEFORE `lunet_paxe_open`.
 // ---------------------------------------------------------------------------
 
@@ -683,7 +676,7 @@ pub extern "C" fn lunet_paxe_open(
 /// This gate exists so the plaintext drop is EXPLICIT, with its own
 /// counter ([`stats::RejectReason::Plaintext`]): it must not rest on the
 /// flags constant-bit check, because crafted plaintext could have a byte
-/// 8 that passes it (item09). The addressing check is the honest
+/// 8 that passes it. The addressing check is the honest
 /// transport-level discriminator — a datagram that is not even addressed
 /// to this node in PAXE framing is not a frame for this node, whatever
 /// its flags byte says — and it runs BEFORE the codec, so when the
@@ -736,7 +729,7 @@ pub extern "C" fn lunet_paxe_frame_for_us(frame: *const u8, frame_len: usize) ->
 }
 
 // ---------------------------------------------------------------------------
-// item08: statistics snapshot and failure policy. The counters are the
+// Statistics snapshot and failure policy. The counters are the
 // operator's ONLY diagnostic channel for dropped frames (open collapses
 // every reason to RC_DROP); they are process-global, cumulative, and
 // never reset by any API — consumers measure deltas between snapshots.
@@ -765,7 +758,7 @@ pub extern "C" fn lunet_paxe_stats(out: *mut u64, out_cap: usize) -> u32 {
 /// Select the failure policy: "silent" (drop and count only; the
 /// default), "log_once" (first drop of each reason per window logs one
 /// `[PAXE]` stderr line), "verbose" (every drop logs). Entering log_once
-/// starts a fresh window (the memo resets — recorded decision,
+/// starts a fresh window (the memo resets;
 /// stats.rs). Unknown spellings are RC_INVAL; paxe.lua pre-validates and
 /// returns `false` instead, so that arm is defence in depth.
 #[allow(unsafe_code)]
@@ -852,8 +845,8 @@ mod tests {
 // ---------------------------------------------------------------------------
 // FFI boundary tests. These drive the EXPORTED symbols exactly as
 // paxe.lua does — pointer/length buffers, u32 ids, out-pointers — and pin
-// the two item07 integration properties: the standard/DEK dispatch is
-// wired for both directions, and EVERY open failure collapses to RC_DROP
+// the two integration properties: the standard/DEK dispatch is
+// exercised in both directions, and every open failure collapses to RC_DROP
 // with nothing written to the last-error buffer.
 // ---------------------------------------------------------------------------
 
@@ -900,7 +893,7 @@ mod ffi_tests {
 
     /// Become the OTHER end of the link. The FFI holds ONE store per
     /// process (one Lua VM = one node), and the send/receive addressing
-    /// asymmetry (item03: seal looks up by toId, open by fromId) means a
+    /// asymmetry (: seal looks up by toId, open by fromId) means a
     /// frame A sealed for B can only be opened by B's store — keyed under
     /// peer A. Two genuinely different node ids: shutdown, reconfigure.
     fn become_node_b(epoch: u32) {
@@ -913,7 +906,7 @@ mod ffi_tests {
     }
 
     fn seal(payload: &[u8], to_id: u32, channel: u32) -> (c_int, Vec<u8>) {
-        let mut out = vec![0u8; payload.len() + 83];
+        let mut out = vec![0u8; payload.len() + standard::OVERHEAD];
         let mut out_len: usize = 0;
         let rc = lunet_paxe_seal(
             payload.as_ptr(),
@@ -959,9 +952,9 @@ mod ffi_tests {
         assert_eq!(lunet_paxe_max_payload_dek(), dek::DEK_MAX_PAYLOAD as u32);
         // ...and those values are the documented protocol numbers.
         assert_eq!(lunet_paxe_overhead_standard(), 37);
-        assert_eq!(lunet_paxe_overhead_dek(), 83);
+        assert_eq!(lunet_paxe_overhead_dek(), 97);
         assert_eq!(lunet_paxe_max_payload_standard(), 65470);
-        assert_eq!(lunet_paxe_max_payload_dek(), 65424);
+        assert_eq!(lunet_paxe_max_payload_dek(), 65410);
     }
 
     #[test]
@@ -1023,16 +1016,14 @@ mod ffi_tests {
     }
 
     #[test]
-    fn dispatch_round_trips_both_modes_through_the_ffi() {
+    fn ffi_seal_is_standard_at_every_payload_size() {
         if !gcm() {
             eprintln!("skipping: AES-GCM hardware path unavailable");
             return;
         }
         setup_node_a(3);
 
-        // A seals both boundary sizes FOR B. 63 bytes -> standard on the
-        // wire (flags bit 0 clear), N + 37; 64 bytes -> DEK (bit 0 set),
-        // N + 83.
+        // A seals both payload sizes for B as standard frames.
         let payload63: Vec<u8> = (0..63u8).collect();
         let (rc, frame63) = seal(&payload63, NODE_B, CHAN);
         assert_eq!(rc, RC_OK, "seal 63: {}", last_error_string());
@@ -1041,13 +1032,12 @@ mod ffi_tests {
         let payload64: Vec<u8> = (0..64u8).collect();
         let (rc, frame64) = seal(&payload64, NODE_B, CHAN);
         assert_eq!(rc, RC_OK, "seal 64: {}", last_error_string());
-        assert_eq!(frame64.len(), 64 + 83);
-        assert_eq!(frame64[8] & 0x01, 1, "64-byte payload must seal DEK");
+        assert_eq!(frame64.len(), 64 + 37);
+        assert_eq!(frame64[8] & 0x01, 0, "64-byte payload must seal standard");
         // The wire epoch is the installed one (flags bits 3-7).
         assert_eq!(frame64[8] >> 3, 3);
 
-        // B opens both: from_id is A's (genuinely different) id, the
-        // channel round-trips, and the mode is reported per frame.
+        // B opens both frames with standard mode.
         become_node_b(3);
         let (rc, plain, from_id, channel, mode) = open(&frame63);
         assert_eq!(rc, RC_OK);
@@ -1059,7 +1049,7 @@ mod ffi_tests {
         assert_eq!(rc, RC_OK);
         assert_eq!(plain, payload64);
         assert_eq!(from_id, NODE_A);
-        assert_eq!(mode, 1, "DEK mode reported as 1");
+        assert_eq!(mode, 0, "standard mode reported as 0");
     }
 
     #[test]
@@ -1180,22 +1170,21 @@ mod ffi_tests {
         assert_eq!(rc, RC_ERR);
         assert!(last_error_string().contains("no key installed"));
 
-        // Oversize: above the DEK maximum (every payload >= 64 selects
-        // DEK). Operational failure naming the mode and the number.
+        // Oversize: above the standard maximum.
         assert_eq!(
             lunet_paxe_keystore_set(NODE_B, 3, KEY.as_ptr(), KEY.len()),
             RC_OK
         );
-        let big = vec![0u8; dek::DEK_MAX_PAYLOAD + 1];
+        let big = vec![0u8; standard::MAX_PAYLOAD + 1];
         let (rc, _) = seal(&big, NODE_B, CHAN);
         assert_eq!(rc, RC_ERR);
         let msg = last_error_string();
         assert!(
-            msg.contains("DEK-mode maximum of 65424"),
+            msg.contains("standard-mode maximum of 65470"),
             "message was: {msg}"
         );
         // Exactly the maximum seals.
-        let max = vec![0u8; dek::DEK_MAX_PAYLOAD];
+        let max = vec![0u8; standard::MAX_PAYLOAD];
         let (rc, frame) = seal(&max, NODE_B, CHAN);
         assert_eq!(rc, RC_OK, "seal max: {}", last_error_string());
         assert_eq!(frame.len(), 65507);
@@ -1233,7 +1222,7 @@ mod ffi_tests {
     }
 
     // -------------------------------------------------------------------
-    // item08: counters at the FFI boundary. Delta-measured throughout —
+    // Counters at the FFI boundary. Delta-measured throughout —
     // no absolute values (the counters are cumulative process state).
     // -------------------------------------------------------------------
 
@@ -1279,7 +1268,7 @@ mod ffi_tests {
         use stats::RejectReason as R;
 
         // An UNCONFIGURED receiver drops but does NOT count: the module
-        // is not running PAXE at all (recorded decision, stats.rs).
+        // is not running PAXE at all (see stats.rs).
         let before = stats::snapshot();
         let (rc, _, _, _, _) = open(b"whatever");
         assert_eq!(rc, RC_DROP);
@@ -1296,11 +1285,8 @@ mod ffi_tests {
         );
 
         setup_node_a(3);
-        let payload40 = [0x55u8; 40]; // sub-threshold: standard frame
+        let payload40 = [0x55u8; 40];
         let (rc, frame63) = seal(&payload40, NODE_B, CHAN);
-        assert_eq!(rc, RC_OK);
-        let payload64 = [0x66u8; 64];
-        let (rc, frame64) = seal(&payload64, NODE_B, CHAN);
         assert_eq!(rc, RC_OK);
         // A also installs epoch 4, so a frame can carry an epoch B lacks.
         assert_eq!(
@@ -1324,7 +1310,7 @@ mod ffi_tests {
         // (re)establishes the receiver configuration it needs.
         for reason in stats::RejectReason::ALL {
             match reason {
-                // rx_plaintext: the item09 protected-socket gate (not
+                // rx_plaintext: the protected-socket gate (not
                 // open()): a datagram whose toId is not this node, with
                 // a flags byte that deliberately PASSES the constant-bit
                 // filter — only the explicit addressing check rejects it.
@@ -1379,22 +1365,19 @@ mod ffi_tests {
                 R::NoPeer => {
                     lunet_paxe_shutdown();
                     assert_eq!(lunet_paxe_set_local_id(300), RC_OK);
-                    assert_one_drop(&frame63, reason);
+                    // The receive path now rejects a foreign destination
+                    // before looking up its source key. Retarget this
+                    // otherwise-valid frame so this arm continues to reach
+                    // the intended missing-peer gate.
+                    let mut no_peer = frame63.clone();
+                    no_peer[2..4].copy_from_slice(&300u16.to_be_bytes());
+                    assert_one_drop(&no_peer, reason);
                 }
                 // rx_no_epoch: B knows peer A but not epoch 4 — a
                 // ROTATION problem.
                 R::NoEpoch => {
                     become_node_b(3);
                     assert_one_drop(&frame63_e4, reason);
-                }
-                // rx_dek_len_mismatch: patch the inner Length (bytes
-                // 65-66), which sits outside the AAD — only the explicit
-                // equality check catches it.
-                R::DekLenMismatch => {
-                    become_node_b(3);
-                    let mut forged_inner = frame64.clone();
-                    forged_inner[65] ^= 0xFF;
-                    assert_one_drop(&forged_inner, reason);
                 }
                 // rx_auth_fail: one flipped ciphertext byte.
                 R::AuthFailed => {
@@ -1426,20 +1409,19 @@ mod ffi_tests {
         }
         setup_node_a(3);
         let before = stats::snapshot();
-        // 63 bytes selects standard; 64 selects DEK (the automatic split
-        // is the operationally interesting signal).
+        // Both payloads use standard mode through the C ABI.
         let (rc, _) = seal(&[0u8; 63], NODE_B, CHAN);
         assert_eq!(rc, RC_OK);
         let (rc, _) = seal(&[0u8; 64], NODE_B, CHAN);
         assert_eq!(rc, RC_OK);
         // Oversize: RC_ERR, counted, and NOT a sealed frame.
-        let big = vec![0u8; dek::DEK_MAX_PAYLOAD + 1];
+        let big = vec![0u8; standard::MAX_PAYLOAD + 1];
         let (rc, _) = seal(&big, NODE_B, CHAN);
         assert_eq!(rc, RC_ERR);
         let after = stats::snapshot();
         assert_eq!(after.tx_total - before.tx_total, 2, "two seals");
-        assert_eq!(after.tx_standard - before.tx_standard, 1, "63-byte seal");
-        assert_eq!(after.tx_dek - before.tx_dek, 1, "64-byte seal");
+        assert_eq!(after.tx_standard - before.tx_standard, 2, "standard seals");
+        assert_eq!(after.tx_dek - before.tx_dek, 0, "no fanout C ABI");
         assert_eq!(after.tx_oversize - before.tx_oversize, 1, "oversize offer");
         assert_eq!(
             after.rx_total - before.rx_total,
@@ -1463,7 +1445,7 @@ mod ffi_tests {
         // order, identical to the in-crate snapshot.
         let n = lunet_paxe_stats(std::ptr::null_mut(), 0);
         assert_eq!(n as usize, stats::SNAPSHOT_FIELD_COUNT);
-        assert_eq!(n, 14);
+        assert_eq!(n, 13);
 
         stats::record_rx_ok();
         stats::record_rx_drop();
@@ -1480,8 +1462,8 @@ mod ffi_tests {
         assert_eq!(buf[0], s.rx_total);
         assert_eq!(buf[1], s.rx_ok);
         assert_eq!(buf[6], s.reject(stats::RejectReason::NoPeer));
-        assert_eq!(buf[10], s.tx_total);
-        assert_eq!(buf[12], s.tx_dek);
+        assert_eq!(buf[9], s.tx_total);
+        assert_eq!(buf[11], s.tx_dek);
         assert_invariant(&s, "over direct recordings");
     }
 
@@ -1516,7 +1498,7 @@ mod ffi_tests {
     }
 
     // -------------------------------------------------------------------
-    // item09: the protected-socket plaintext gate. A datagram is "for us"
+    // The protected-socket plaintext gate. A datagram is "for us"
     // iff it carries at least the 9-byte prefix AND a header toId equal
     // to the configured local id — the explicit check, never the flags
     // byte. Counting: a rejection moves rx_total AND rx_plaintext, each
@@ -1571,7 +1553,7 @@ mod ffi_tests {
             "a frame is open's to count"
         );
 
-        // THE item09 attack case: plaintext crafted so byte 8 PASSES the
+        // THE attack case: plaintext crafted so byte 8 PASSES the
         // flags constant-bit gate (0x04: pattern bits set), with a toId
         // that is not this node. The explicit addressing check rejects it
         // and the PLAINTEXT counter moves — rx_bad_flags must not.
