@@ -46,7 +46,7 @@ use crate::stomp::Frame;
 /// PAXE channel for peer traffic. Channels 1-99 are reserved system
 /// channels, so the obvious choice of 67 is not available; 6767 is the
 /// nearest thing to the joke that the protocol permits.
-const PEER_CHANNEL: u16 = 6767;
+const PEER_CHANNEL: u32 = 6767;
 
 /// The single key epoch this demo installs. Rotation is a PAXE feature and
 /// a deliberate non-feature here: one epoch, provisioned identically on

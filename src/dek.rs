@@ -334,7 +334,7 @@ fn open_dek(
     }
     // Payload length is derived from the frame geometry; there is no
     // declared length in the prefix.
-    let declared = frame.len() - DEK_OVERHEAD;
+    let payload_len = frame.len() - DEK_OVERHEAD;
     if header.to_id != store.local_id() {
         stats::record_reject(RejectReason::Plaintext);
         return Err(OpenError::WrongDestination);
@@ -390,7 +390,7 @@ fn open_dek(
         }
         Err(e) => return Err(OpenError::Sodium(e)),
     }
-    let mut out = vec![0u8; declared];
+    let mut out = vec![0u8; payload_len];
     let body = frame
         .get(layout::BODY..)
         .ok_or(OpenError::Sodium(SodiumError::Internal))?;

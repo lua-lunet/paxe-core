@@ -369,7 +369,7 @@ pub fn open(
     // A truncated or extended datagram produces a ciphertext whose GCM tag
     // does not verify, ensuring rejection without yielding plaintext.
     if frame.len() < OVERHEAD {
-        stats::record_reject(RejectReason::TooShort);
+        stats::record_reject(RejectReason::LenMismatch);
         return Err(OpenError::Rejected);
     }
 

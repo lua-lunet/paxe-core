@@ -106,7 +106,7 @@ Sealing proceeds as follows:
 3. Construct the recipient-independent body AAD:
 
    ```text
-   BE16(fromId) | BE16(channel) | BE16(length) | 0x05
+   BE16(fromId) | BE32(channel) | 0x05
    ```
 
    `0x05` is the canonical reusable-DEK mode marker: DEK bit set, required
