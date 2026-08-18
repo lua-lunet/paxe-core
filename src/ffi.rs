@@ -108,16 +108,15 @@ fn epoch_message(v: u32) -> String {
 
 /// Seal-side channel validation: channels 1-99 are RESERVED for system
 /// traffic (PAXE.md "Channels"); the application API seals on channel 0
-/// and 100-65535 only. (Receive-side there is no such gate: `open`
+/// and 100 and above only. (Receive-side there is no such gate: `open`
 /// reports whatever channel the authenticated header carries.)
-fn check_channel(v: u32) -> Result<u16, String> {
-    let c = check_u16(v, "channel")?;
-    if (1..=99).contains(&c) {
+fn check_channel(v: u32) -> Result<u32, String> {
+    if (1..=99).contains(&v) {
         return Err(format!(
-            "channel {c} is reserved: 1-99 are system channels, application channels start at 100"
+            "channel {v} is reserved: 1-99 are system channels, application channels start at 100"
         ));
     }
-    Ok(c)
+    Ok(v)
 }
 
 /// Borrow a Lua buffer as a slice for the duration of one call.
@@ -636,7 +635,7 @@ pub extern "C" fn lunet_paxe_open(
                 unsafe {
                     *out_len = plain.len();
                     *from_id = u32::from(h.from_id);
-                    *channel = u32::from(h.channel);
+                    *channel = h.channel;
                     *mode = match f.mode() {
                         codec::Mode::Standard => 0,
                         codec::Mode::Dek => 1,

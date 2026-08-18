@@ -153,11 +153,10 @@ fn psk(stored: &StoredKey) -> Result<&Key, SodiumError> {
     Ok(Key::from_borrowed(bytes))
 }
 
-fn body_aad(from_id: u16, channel: u16, length: u16) -> [u8; 7] {
+fn body_aad(from_id: u16, channel: u32) -> [u8; 7] {
     let [f0, f1] = from_id.to_be_bytes();
-    let [c0, c1] = channel.to_be_bytes();
-    let [l0, l1] = length.to_be_bytes();
-    [f0, f1, c0, c1, l0, l1, 0x05]
+    let [c0, c1, c2, c3] = channel.to_be_bytes();
+    [f0, f1, c0, c1, c2, c3, 0x05]
 }
 
 fn envelope_aad(
@@ -177,7 +176,7 @@ fn envelope_aad(
 pub fn seal(
     store: &KeyStore,
     to_id: u16,
-    channel: u16,
+    channel: u32,
     epoch: Epoch,
     payload: &[u8],
 ) -> Result<Vec<u8>, SealError> {
@@ -201,7 +200,7 @@ pub fn seal(
 pub fn seal_fanout(
     store: &KeyStore,
     recipients: &[u16],
-    channel: u16,
+    channel: u32,
     payload: &[u8],
 ) -> Result<Vec<FanoutFrame>, SealError> {
     let selected = select_fanout(store, recipients, payload)?;
@@ -243,15 +242,14 @@ fn select_fanout<'a>(
 fn seal_fanout_core(
     local_id: u16,
     selected: Vec<(u16, Epoch, &StoredKey)>,
-    channel: u16,
+    channel: u32,
     payload: &[u8],
     dek: KeyGuard,
     body_nonce: Nonce,
     envelope_nonces: &[Nonce],
 ) -> Result<Vec<FanoutFrame>, SealError> {
     debug_assert_eq!(envelope_nonces.len(), selected.len());
-    let length = u16::try_from(payload.len()).map_err(|_| SealError::Oversize(payload.len()))?;
-    let body_aad = body_aad(local_id, channel, length);
+    let body_aad = body_aad(local_id, channel);
     let mut body = vec![0u8; NPUBBYTES + payload.len() + ABYTES];
     body[..NPUBBYTES].copy_from_slice(body_nonce.as_bytes());
     sodium::aead_encrypt(
@@ -270,7 +268,6 @@ fn seal_fanout_core(
             from_id: local_id,
             to_id,
             channel,
-            length,
         };
         let flags = Flags::new(Mode::Dek, epoch);
         let prefix = codec::serialize_prefix(&header, &flags);
@@ -312,7 +309,8 @@ pub fn open(store: &KeyStore, frame: &[u8]) -> Result<(Header, Flags, Vec<u8>), 
         }
     };
     if flags.mode() == Mode::Standard {
-        let mut out = vec![0u8; header.length as usize];
+        let max_payload = frame.len().saturating_sub(standard::OVERHEAD);
+        let mut out = vec![0u8; max_payload];
         return match standard::open(store, frame, &mut out) {
             Ok((h, f, n)) => {
                 out.truncate(n);
@@ -334,15 +332,9 @@ fn open_dek(
         stats::record_reject(RejectReason::TooShort);
         return Err(OpenError::TooShort(frame.len()));
     }
-    let declared = header.length as usize;
-    if declared > DEK_MAX_PAYLOAD {
-        stats::record_reject(RejectReason::LenMismatch);
-        return Err(OpenError::LengthMismatch);
-    }
-    if frame.len() != declared + DEK_OVERHEAD {
-        stats::record_reject(RejectReason::LenMismatch);
-        return Err(OpenError::LengthMismatch);
-    }
+    // Payload length is derived from the frame geometry; there is no
+    // declared length in the prefix.
+    let declared = frame.len() - DEK_OVERHEAD;
     if header.to_id != store.local_id() {
         stats::record_reject(RejectReason::Plaintext);
         return Err(OpenError::WrongDestination);
@@ -405,7 +397,7 @@ fn open_dek(
     match sodium::aead_decrypt(
         dek.key(),
         &Nonce::from_bytes(body_nonce),
-        &body_aad(header.from_id, header.channel, header.length),
+        &body_aad(header.from_id, header.channel),
         body,
         &mut out,
     ) {
@@ -425,7 +417,7 @@ fn open_dek(
 pub(crate) fn seal_fanout_deterministic(
     store: &KeyStore,
     recipients: &[u16],
-    channel: u16,
+    channel: u32,
     payload: &[u8],
     dek: [u8; KEYBYTES],
     body_nonce: [u8; NPUBBYTES],
@@ -568,7 +560,6 @@ mod tests {
                 from_id: A,
                 to_id: B,
                 channel: 1,
-                length: 0,
             },
             &Flags::new(Mode::Dek, ep(1)),
         );
@@ -582,21 +573,12 @@ mod tests {
             );
         }
 
-        let mut overlarge = vec![0; DEK_MAX_PAYLOAD + 1 + DEK_OVERHEAD];
-        let overlarge_prefix = codec::serialize_prefix(
-            &Header {
-                from_id: A,
-                to_id: B,
-                channel: 1,
-                length: (DEK_MAX_PAYLOAD + 1) as u16,
-            },
-            &Flags::new(Mode::Dek, ep(1)),
-        );
-        overlarge[..PREFIX_LEN].copy_from_slice(&overlarge_prefix);
-        assert_eq!(
-            open(&receiver(B, ep(1), [0x11; KEYBYTES]), &overlarge),
-            Err(OpenError::LengthMismatch)
-        );
+        // An all-zero frame of exactly DEK_OVERHEAD bytes passes the
+        // geometry gate but is correctly rejected by the AEAD (no valid
+        // key material or authentication).
+        let mut min_frame = vec![0u8; DEK_OVERHEAD];
+        min_frame[..PREFIX_LEN].copy_from_slice(&prefix);
+        assert!(open(&receiver(B, ep(1), [0x11; KEYBYTES]), &min_frame).is_err());
     }
 
     #[test]

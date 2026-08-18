@@ -36,8 +36,7 @@ Every frame starts with this nine-byte prefix:
 offset  size  field      encoding
 0       2     fromId     unsigned big-endian
 2       2     toId       unsigned big-endian
-4       2     channel    unsigned big-endian
-6       2     length     plaintext payload length, unsigned big-endian
+4       4     channel    unsigned big-endian
 8       1     flags      bit layout below
 ```
 
@@ -50,9 +49,10 @@ bit 2      must be 1
 bits 3-7   PSK epoch, 0..=31
 ```
 
-All multibyte integers are unsigned big-endian values. `length` is the
-plaintext length, not the datagram length. Frames with invalid constant flag
-bits, an unsupported mode, or inconsistent geometry are rejected.
+All multibyte integers are unsigned big-endian values. Payload length is
+not carried in the prefix; it is derived from the received datagram length
+minus the fixed per-mode frame overhead. Frames with invalid constant flag
+bits, an unsupported mode, or insufficient datagram geometry are rejected.
 
 ## Standard frame
 
