@@ -37,6 +37,14 @@ path = "src/bin/six-seven-server/main.rs"
 # its own `lunet_paxe_*` symbols must turn it off.
 default = ["ffi"]
 ffi = []
+# Exposes the deterministic (caller-supplied-nonce) seal seams so the
+# integration test in tests/kat_from_json.rs can reproduce the known-answer
+# frames from the JSON fixture. Off by default: the seams are test-only
+# (deterministic nonces must never be reachable in production — GCM nonce
+# reuse under one key destroys confidentiality and authenticity), and
+# `#[cfg(test)]` alone does not reach integration tests, which compile this
+# crate as a normal dependency.
+kat = []
 
 # DEPENDENCY POLICY: zero crates. Not libc, not zeroize, not secrecy, not a
 # crypto crate. All cryptography AND all secure-memory handling come from

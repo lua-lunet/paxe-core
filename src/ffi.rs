@@ -108,16 +108,15 @@ fn epoch_message(v: u32) -> String {
 
 /// Seal-side channel validation: channels 1-99 are RESERVED for system
 /// traffic (PAXE.md "Channels"); the application API seals on channel 0
-/// and 100-65535 only. (Receive-side there is no such gate: `open`
+/// and 100 and above only. (Receive-side there is no such gate: `open`
 /// reports whatever channel the authenticated header carries.)
-fn check_channel(v: u32) -> Result<u16, String> {
-    let c = check_u16(v, "channel")?;
-    if (1..=99).contains(&c) {
+fn check_channel(v: u32) -> Result<u32, String> {
+    if (1..=99).contains(&v) {
         return Err(format!(
-            "channel {c} is reserved: 1-99 are system channels, application channels start at 100"
+            "channel {v} is reserved: 1-99 are system channels, application channels start at 100"
         ));
     }
-    Ok(c)
+    Ok(v)
 }
 
 /// Borrow a Lua buffer as a slice for the duration of one call.
@@ -636,7 +635,7 @@ pub extern "C" fn lunet_paxe_open(
                 unsafe {
                     *out_len = plain.len();
                     *from_id = u32::from(h.from_id);
-                    *channel = u32::from(h.channel);
+                    *channel = h.channel;
                     *mode = match f.mode() {
                         codec::Mode::Standard => 0,
                         codec::Mode::Dek => 1,
@@ -992,12 +991,10 @@ mod ffi_tests {
             lunet_paxe_keystore_set(70000, 3, KEY.as_ptr(), KEY.len()),
             RC_INVAL
         );
-        // Channels 1-99 are reserved; 0 and 100+ are fine.
+        // Channels 1-99 are reserved; 0 and 100+ (including large u32 values) are fine.
         let (rc, _) = seal(b"x", NODE_B, 99);
         assert_eq!(rc, RC_INVAL);
         assert!(last_error_string().contains("reserved"));
-        let (rc, _) = seal(b"x", NODE_B, 65536);
-        assert_eq!(rc, RC_INVAL);
         // Null payload pointer with a non-zero length: malformed, no panic.
         let mut out_len: usize = 0;
         let mut buf = [0u8; 128];
@@ -1354,11 +1351,18 @@ mod ffi_tests {
                     bad_flags[8] = 0x00;
                     assert_one_drop(&bad_flags, reason);
                 }
-                // rx_len_mismatch: a real standard frame truncated by
-                // one byte.
+                // rx_len_mismatch: a standard-mode frame that passes the
+                // prefix parse and addressing gate but is shorter than
+                // OVERHEAD (9-byte prefix + 12-byte nonce + 16-byte tag
+                // = 37 bytes minimum). to_id must match the local node.
                 R::LenMismatch => {
                     become_node_b(3);
-                    assert_one_drop(&frame63[..frame63.len() - 1], reason);
+                    let mut short_std = vec![0u8; 36]; // PREFIX_LEN <= 36 < OVERHEAD
+                                                       // toId = NODE_B so addressing check passes.
+                    short_std[2] = (NODE_B >> 8) as u8;
+                    short_std[3] = (NODE_B & 0xFF) as u8;
+                    short_std[8] = 0x1C; // Standard mode, pattern 01, epoch 3
+                    assert_one_drop(&short_std, reason);
                 }
                 // rx_no_peer: a node with NO key for A under any epoch —
                 // a TOPOLOGY problem, counted separately from NoEpoch.
