@@ -413,8 +413,8 @@ fn open_dek(
     }
 }
 
-#[cfg(test)]
-pub(crate) fn seal_fanout_deterministic(
+#[cfg(any(test, feature = "kat"))]
+pub fn seal_fanout_deterministic(
     store: &KeyStore,
     recipients: &[u16],
     channel: u32,

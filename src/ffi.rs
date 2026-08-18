@@ -1358,7 +1358,7 @@ mod ffi_tests {
                 R::LenMismatch => {
                     become_node_b(3);
                     let mut short_std = vec![0u8; 36]; // PREFIX_LEN <= 36 < OVERHEAD
-                    // toId = NODE_B so addressing check passes.
+                                                       // toId = NODE_B so addressing check passes.
                     short_std[2] = (NODE_B >> 8) as u8;
                     short_std[3] = (NODE_B & 0xFF) as u8;
                     short_std[8] = 0x1C; // Standard mode, pattern 01, epoch 3

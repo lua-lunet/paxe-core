@@ -445,8 +445,8 @@ pub fn open(
 /// span and frame geometry byte-for-byte against fixed inputs. Reaches
 /// the identical [`seal_core`] the production path uses — the only
 /// difference is where the nonce comes from.
-#[cfg(test)]
-pub(crate) fn seal_standard_deterministic(
+#[cfg(any(test, feature = "kat"))]
+pub fn seal_standard_deterministic(
     store: &KeyStore,
     to_id: u16,
     channel: u32,

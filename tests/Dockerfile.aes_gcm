@@ -1,0 +1,108 @@
+# Independent AES-256-GCM known-answer gate for paxe-core.
+#
+# What this image proves that `cargo test` alone cannot: that the hex
+# constants in src/vectors.rs are the bytes a SECOND, independent AES-256-GCM
+# implementation (OpenSSL EVP, via Python's `cryptography` package) produces
+# from the same key/nonce/AAD/plaintext — not merely bytes this crate's own
+# seal emitted. It also runs the full Rust suite and the two-node e2e so the
+# image is a complete local CI-parity gate for a colima/aarch64 host.
+#
+# Skinny by construction: Debian trixie, no BuildKit, no volume mounts (colima
+# volume mounts are broken), classic `docker build` only. LuaJIT is installed
+# because paxe-core lives in the lua-lunet world, whose host runtime is
+# LuaJIT (5.1 ABI); the C ABI this crate exports is consumed from there.
+#
+# Build (from the repo root):
+#   docker build -f tests/Dockerfile.aes_gcm -t paxe-aes-gcm:trixie .
+# Run:
+#   docker run --rm paxe-aes-gcm:trixie
+#
+# The build is pinned to linux/arm64 to match the colima aarch64 host. On an
+# x86_64 host, drop the --platform line (or set it to linux/amd64); the
+# libsodium source build adapts to either, but the ARM CE AES-256-GCM path
+# is the reason the distro package is NOT used here.
+
+FROM --platform=linux/arm64 debian:trixie
+
+ENV DEBIAN_FRONTEND=noninteractive
+
+# Skinny toolchain for the gate:
+#   build-essential pkg-config curl ca-certificates git  — build libsodium + rustup
+#   rustup                                               — installs the rust-toolchain.toml-pinned
+#                                                          1.95.0 with rustfmt + clippy components
+#   luajit libluajit-5.1-dev                             — the lua-lunet host runtime (5.1 ABI)
+#   python3 python3-cryptography                         — the independent KAT (OpenSSL EVP, no pip)
+#   netcat-openbsd                                       — the two-node e2e waits on STOMP ports
+# rustup (not the Debian rustc/cargo) is used so the pinned toolchain from
+# rust-toolchain.toml is honored exactly — the Debian package is 1.85 and
+# ships no rustfmt/clippy. python3-cryptography is the Debian wheel (links
+# the system libssl), so no pip/build-deps sprawl.
+RUN apt-get update && apt-get install -y --no-install-recommends \
+      build-essential pkg-config \
+      rustup \
+      luajit libluajit-5.1-dev \
+      python3 python3-cryptography \
+      curl ca-certificates git \
+      netcat-openbsd \
+    && rm -rf /var/lib/apt/lists/*
+
+# Install the pinned toolchain (rust-toolchain.toml drives the version) with
+# the fmt and clippy components, then put it on PATH. rustup downloads the
+# toolchain once here, so the image is self-contained at run time.
+RUN rustup default 1.95.0 \
+    && rustup component add rustfmt clippy
+ENV PATH="/root/.cargo/bin:${PATH}"
+
+# Static libsodium 1.0.22 from source. The trixie arm64 distro package lacks
+# the ARM CE AES-256-GCM runtime path that paxe-core's AES-GCM requires, and
+# 1.0.21 does not compile on aarch64 with GCC (NEON vector conversion bugs
+# fixed in 1.0.22). paxe-core's build.rs resolves PAXE_SODIUM_LIB_DIR first,
+# so point it at the source-built archive.
+ARG LIBSODIUM_VERSION=1.0.22
+ARG LIBSODIUM_SHA256=adbdd8f16149e81ac6078a03aca6fc03b592b89ef7b5ed83841c086191be3349
+RUN set -eux; \
+    cd /tmp; \
+    curl -fsSL -o libsodium.tar.gz \
+      "https://download.libsodium.org/libsodium/releases/libsodium-${LIBSODIUM_VERSION}.tar.gz"; \
+    echo "${LIBSODIUM_SHA256}  libsodium.tar.gz" | sha256sum -c -; \
+    tar xzf libsodium.tar.gz; \
+    cd "libsodium-${LIBSODIUM_VERSION}"; \
+    ./configure --enable-static --disable-shared --prefix=/usr/local > /dev/null; \
+    make -j"$(nproc)" > /dev/null; \
+    make install > /dev/null; \
+    cd /tmp; \
+    rm -rf "libsodium-${LIBSODIUM_VERSION}" libsodium.tar.gz
+ENV PAXE_SODIUM_LIB_DIR=/usr/local/lib
+
+WORKDIR /src
+COPY . /src
+
+# The gate: fmt-check, clippy, the Rust suite, the kat-from-JSON integration
+# test, the two-node e2e, and the independent AES-256-GCM KAT. Each line fails
+# the build if it exits non-zero. `cargo build --bins` is needed before the
+# e2e: six_seven_e2e.sh runs the debug binary at target/debug/six-seven-server,
+# which `cargo test` does not produce.
+#
+# The `kat` feature exposes the deterministic seal seams the JSON integration
+# test needs (see Cargo.toml). clippy and the integration test run with it.
+#
+# To REGENERATE the JSON fixture instead of running the gate, run the image
+# with PAXE_MODE=regen and copy tests/aes_gcm_vectors.json out:
+#   docker run --rm -e PAXE_MODE=regen paxe-aes-gcm:trixie > tests/aes_gcm_vectors.json
+# (see tests/README.md).
+CMD ["bash", "-c", "\
+  set -euo pipefail; \
+  if [ \"${PAXE_MODE:-gate}\" = regen ]; then \
+    echo '===== REGENERATING tests/aes_gcm_vectors.json ====='; \
+    python3 tests/gen_aes_gcm_vectors.py; \
+    cat tests/aes_gcm_vectors.json; \
+    exit 0; \
+  fi; \
+  echo '===== cargo fmt --check ====='; cargo fmt -- --check; \
+  echo '===== cargo clippy ====='; cargo clippy --all-targets --features kat -- -D warnings; \
+  echo '===== cargo test ====='; cargo test --all-targets; \
+  echo '===== cargo test --test kat_from_json --features kat ====='; cargo test --test kat_from_json --features kat; \
+  echo '===== cargo build --bins (for e2e) ====='; cargo build --bins; \
+  echo '===== six-seven e2e ====='; bash tests/six_seven_e2e.sh; \
+  echo '===== independent AES-256-GCM KAT ====='; bash tests/aes_gcm_kat.sh; \
+  echo '===== ALL GATES PASSED ====='"]
