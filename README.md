@@ -57,17 +57,85 @@ rather than falling back to a software path. A build of libsodium without the
 hardware path, or a CPU without the instructions, cannot run this crate — by
 design, not by omission.
 
+## Startup contract — call the checks, fail fast
+
+A broken environment must be discovered at **startup**, not at first packet.
+The crate exposes its environment checks as a single call, and every host is
+required to run it before the first network operation:
+
+- **Rust hosts:** `paxe::startup_check()` — runs `sodium_init`, the ABI size
+  check, and the AES-256-GCM hardware requirement; returns the linked
+  library's version string. Cheap and idempotent.
+- **C-ABI hosts (LuaJIT):** `lunet_paxe_init()` runs the same chain; the
+  specific failure is retrievable via `lunet_paxe_last_error()`.
+
+The requirement: **treat a startup-check failure as fatal for PAXE.** Refuse
+to enable it; surface the error to the operator verbatim. The failure text
+says what is wrong and what satisfies it (e.g. the linked libsodium lacks the
+ARM crypto-extension path; a `1.0.20+` build with ARM CE, or the
+self-contained flavour of this crate, does not). There is no silent
+degradation path — that is the point. This is exactly when a wrong linkage
+flavour or a bad distro sodium surfaces: immediately, with a named cause,
+before any traffic flows.
+
 ## Dependencies
 
 Zero crate dependencies. Not `libc`, not `zeroize`, not a crypto crate. All cryptography and
-all secure-memory handling come from libsodium via `extern "C"` declarations,
-statically linked by `build.rs`. The demo binary holds the same line: its STOMP
-and UDP transports are `std::net` and `std::thread` only.
+all secure-memory handling come from libsodium via `extern "C"` declarations. The demo binary
+holds the same line: its STOMP and UDP transports are `std::net` and `std::thread` only.
 
-`build.rs` needs a **static** libsodium archive. On Unix it reads
-`pkg-config --libs --static libsodium`; set `PAXE_SODIUM_LIB_DIR` to override.
-On Windows it probes a vcpkg static triplet. There is no bundled fallback — a
-missing archive fails the build rather than silently linking something else.
+## Two build flavours: self-contained and system-sodium
+
+Every release publishes the cdylib in **two flavours**, per platform. They are tradeoffs, and
+this project makes **no recommendation** between them — pick according to how you deploy.
+
+**Self-contained** (default build, default flavour of the release archives): libsodium is
+linked **statically** into the cdylib. The artefact has no runtime dependency; the sodium
+version is exactly the one the build linked.
+
+- Advantages: deploy anywhere with nothing installed; the crypto bytes in the artefact are
+  pinned and reproducible; upgrading libsodium is a deliberate act on your schedule.
+- Costs: security fixes in libsodium reach you only when a new release of this crate is cut
+  **and** you redeploy it. Performance fixes (e.g. new CPU dispatch paths) arrive the same way.
+
+**System-sodium** (`--features sodium-dynamic`; release archives suffixed `-system-sodium`):
+the cdylib links the operating system's libsodium (`libsodium.so.23` / `libsodium.dylib`)
+dynamically.
+
+- Advantages: security and performance fixes land via the OS package update train — no new
+  release of this crate, no redeployment. The soname has been stable since libsodium 1.0.8,
+  so any maintained distro works as the provider.
+- Costs: the host must have libsodium installed, and the cdylib runs on **whatever** the OS
+  provides — an OS build without the hardware AES-256-GCM path (Ubuntu 24.04 and Debian
+  trixie arm64, for instance) fails fast at `init()` rather than silently degrading. You
+  cannot pin the sodium version from here.
+
+The call-overhead difference is negligible: the crate makes two libsodium calls per datagram
+(crypto and nonce generation), each an indirect call of nanoseconds against microseconds of
+actual AES-256-GCM work on the payload. Choose on patch logistics and deployment shape, not
+on speed.
+
+### Building each flavour
+
+`build.rs` needs libsodium on the host either way. The static build needs the **archive**:
+on Unix it reads `pkg-config --libs --static libsodium`; set `PAXE_SODIUM_LIB_DIR` to
+override. On Windows it probes a vcpkg static triplet. The dynamic build needs pkg-config to
+know the system libsodium (`libsodium-dev` / `brew install libsodium`). There is no bundled
+fallback — a missing library fails the build rather than silently linking something else.
+
+    cargo build --release                          # self-contained (static sodium)
+    cargo build --release --features sodium-dynamic  # system-sodium (dynamic)
+
+The `sodium-dynamic` feature is rejected at build time on Windows: there is no system
+libsodium provider there, so the self-contained flavour is the only Windows artefact.
+
+## Platform priority
+
+**Linux (amd64 and aarch64) is the release target**, both flavours, tested and published per
+release. macOS is a best-effort lane kept for local development testing. Windows is gated
+best-effort (the self-contained flavour only). The `sodium-dynamic` macOS artefact is
+explicitly non-guaranteed while the project is pre-1.0: it links whatever Homebrew ships at
+build time.
 
 ## Evidence
 

@@ -1,13 +1,28 @@
-//! Build script: locate a STATIC libsodium archive and link it into the
-//! cdylib. Zero crate dependencies, so this drives `pkg-config` (Unix) or
-//! probes the workspace vcpkg tree (Windows) by hand.
+//! Build script: link libsodium, STATICALLY or DYNAMICALLY depending on the
+//! `sodium-dynamic` cargo feature. Zero crate dependencies, so this drives
+//! `pkg-config` (Unix) or probes the workspace vcpkg tree (Windows) by hand.
 //!
-//! Owner decision: libsodium is linked STATICALLY. This script therefore
-//! hard-fails the build when no static archive is found; it never falls
-//! back to the shared library. A silent dynamic fallback would defeat the
-//! decision and must not happen.
+//! Two link modes, both first-class — the release pipeline publishes one
+//! cdylib per mode and the README documents the tradeoffs without
+//! recommending either:
 //!
-//! Resolution order:
+//! - Default (STATIC): the archive is linked into the cdylib. The artefact
+//!   is self-contained, its sodium version is pinned by the build, and no
+//!   deployment dependency exists — but OS sodium security fixes reach
+//!   consumers only via a new release of this crate and a rebuild of every
+//!   downstream.
+//! - `sodium-dynamic` (DYNAMIC): the cdylib links the system libsodium and
+//!   inherits its patch and performance updates for free (the soname has
+//!   been stable since libsodium 1.0.8). Cost: the host must have libsodium
+//!   installed, and a distro build lacking the hardware AES-GCM path fails
+//!   fast at `lunet_paxe_init` (never silently — see the
+//!   `AesGcmUnavailable` docs).
+//!
+//! Owner decision for the DEFAULT mode: static. This script hard-fails when
+//! no static archive is found; it never falls back to the shared library. A
+//! silent fallback would defeat the decision and must not happen.
+//!
+//! Resolution order, STATIC mode:
 //!   1. `PAXE_SODIUM_LIB_DIR` env var — directory containing `libsodium.a`
 //!      (Unix) or `libsodium.lib` (Windows). This is the override for CI,
 //!      cross builds and vendored prebuilts.
@@ -17,7 +32,14 @@
 //!   3. Windows: `%VCPKG_ROOT%\installed\x64-windows\lib\libsodium.lib`,
 //!      then `<workspace>/vcpkg/installed/x64-windows/lib/libsodium.lib`
 //!      (the layout `contributing/deps/windows.ps1` produces).
-
+//!
+//! Resolution order, DYNAMIC mode (Unix only — Windows has no system
+//! libsodium, so the feature is rejected there):
+//!   1. `-L` dirs from `pkg-config --libs libsodium` (NO --static).
+//!   2. `pkg-config --variable=libdir libsodium`.
+//!
+//! The link itself is `dylib=sodium`; the startup checks in `sodium.rs`
+//! are the runtime safety net (version/size probe, AES-GCM availability).
 use std::env;
 use std::path::PathBuf;
 use std::process::Command;
@@ -26,6 +48,14 @@ fn main() {
     println!("cargo:rerun-if-env-changed=PAXE_SODIUM_LIB_DIR");
     println!("cargo:rerun-if-env-changed=VCPKG_ROOT");
 
+    if env::var_os("CARGO_FEATURE_SODIUM_DYNAMIC").is_some() {
+        link_dynamic();
+        return;
+    }
+    link_static();
+}
+
+fn link_static() {
     let dir = locate();
     let src = dir.join(archive_name());
     println!("cargo:rerun-if-changed={}", src.display());
@@ -76,6 +106,63 @@ fn main() {
         // libSystem, so naming it is harmless there and required on Linux.
         println!("cargo:rustc-link-lib=pthread");
     }
+}
+
+/// Dynamic link mode (`sodium-dynamic` feature). Unix only: Windows has no
+/// system libsodium provider, so the feature is rejected there and the
+/// self-contained (default, static) build is the only Windows artefact.
+///
+/// The link is `dylib=sodium` against the distro/brew libsodium; the
+/// soname has been stable since libsodium 1.0.8, so no per-version search
+/// path is needed. `-L` flags from pkg-config (when the library lives
+/// outside the default linker search path — Homebrew kegs, hand installs)
+/// are forwarded as link-search entries. Missing pkg-config is not fatal:
+/// a system-search link still works on Debian/Ubuntu and other layouts
+/// that install libsodium into the default paths.
+///
+/// Runtime verification is the startup check, not the link: the first
+/// `lunet_paxe_init` probes the linked library's reported sizes and the
+/// hardware AES-GCM path and fails fast with a reportable error — a
+/// distro sodium without the ARM crypto-extension path dies here, loudly,
+/// never silently.
+fn link_dynamic() {
+    if env::var("CARGO_CFG_WINDOWS").is_ok() {
+        fatal(
+            "the sodium-dynamic feature is not supported on Windows: there \
+             is no system libsodium provider. Build the default (static) \
+             artefact instead.",
+        );
+    }
+
+    // Forward -L flags (keg paths, hand installs). Order mirrors the
+    // static resolver: --libs first, then --variable=libdir as a fallback
+    // when the library sits in a default search path and pkg-config emits
+    // no -L.
+    for query in [
+        ["--libs", "libsodium"].as_slice(),
+        ["--variable=libdir", "libsodium"].as_slice(),
+    ] {
+        if let Ok(output) = Command::new("pkg-config").args(query).output() {
+            if output.status.success() {
+                let text = String::from_utf8_lossy(&output.stdout);
+                let mut tokens = text.split_whitespace();
+                while let Some(tok) = tokens.next() {
+                    if tok == "-L" {
+                        if let Some(dir) = tokens.next() {
+                            println!("cargo:rustc-link-search=native={dir}");
+                        }
+                    } else if let Some(dir) = tok.strip_prefix("-L") {
+                        println!("cargo:rustc-link-search=native={dir}");
+                    }
+                }
+            }
+        }
+    }
+
+    println!("cargo:rustc-link-lib=dylib=sodium");
+    // libsodium uses pthread on Unix. macOS folds pthread into libSystem,
+    // so naming it is harmless there and required on Linux.
+    println!("cargo:rustc-link-lib=pthread");
 }
 
 /// Directory guaranteed to contain the static archive, or the build dies

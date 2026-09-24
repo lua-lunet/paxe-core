@@ -1,0 +1,313 @@
+name: Build
+
+# Cross-platform gate + release pipeline for the paxe-core cdylib. Lane
+# split follows the sibling lua-lunet repos (uvrr-core's CI, lunet's
+# build.yml): every run gates on Linux amd64/arm64 + macOS; tagged runs
+# (v*) additionally package and publish the release archives.
+#
+# PLATFORM PRIORITY: Linux amd64 + aarch64 are the release target (both
+# flavours). macOS is best-effort, kept for local-dev parity. Windows is
+# DISABLED in this matrix for now (Blacksmith Windows runners are slow and
+# there is no system-sodium provider there anyway); the code supports it
+# via the self-contained flavour and it can rejoin the matrix when needed.
+#
+# TWO FLAVOURS, published together on every tag (README.md documents the
+# tradeoffs; the project recommends neither):
+#
+#   paxe-core-<target>.tar.gz                  self-contained: libsodium
+#                                              linked STATICALLY (default)
+#   paxe-core-<target>-system-sodium.tar.gz    links the SYSTEM libsodium
+#                                              dynamically (`sodium-dynamic`)
+#
+# Static-linking invariant enforced in CI, not just locally: after each
+# release build the cdylib is checked for the PRESENCE (dynamic flavour)
+# or ABSENCE (static flavour) of a dynamic libsodium dependency — the
+# finished artefacts must honour the flavour they are labelled as.
+
+on:
+  push:
+    branches: [ main ]
+    tags:
+      - 'v*'
+  pull_request:
+    branches: [ main ]
+  workflow_dispatch:
+    inputs:
+      ref:
+        description: 'Branch or tag to build'
+        required: false
+        default: ''
+      targets:
+        description: 'Comma-separated targets to build (empty = all): linux-amd64, linux-arm64, macos'
+        required: false
+        default: ''
+
+permissions:
+  contents: write
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.head_ref || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  setup-matrix:
+    name: Setup build matrix
+    runs-on: ubuntu-latest
+    outputs:
+      matrix: ${{ steps.set-matrix.outputs.matrix }}
+    steps:
+      - id: set-matrix
+        run: |
+          TARGETS="${{ github.event.inputs.targets }}"
+          ALL='{"include":[{"os":"ubuntu-latest","platform":"linux","target_key":"linux-amd64"},{"os":"blacksmith-4vcpu-ubuntu-2404-arm","platform":"linux","target_key":"linux-arm64"},{"os":"macos-latest","platform":"macos","target_key":"macos"}]}'
+          if [ -z "$TARGETS" ]; then
+            echo "matrix=$ALL" >> "$GITHUB_OUTPUT"
+          else
+            FILTERED='{"include":['
+            FIRST=true
+            IFS=',' read -ra TARGET_LIST <<< "$TARGETS"
+            for target in "${TARGET_LIST[@]}"; do
+              target=$(echo "$target" | xargs)
+              case "$target" in
+                linux-amd64) ENTRY='{"os":"ubuntu-latest","platform":"linux","target_key":"linux-amd64"}' ;;
+                linux-arm64) ENTRY='{"os":"blacksmith-4vcpu-ubuntu-2404-arm","platform":"linux","target_key":"linux-arm64"}' ;;
+                macos)       ENTRY='{"os":"macos-latest","platform":"macos","target_key":"macos"}' ;;
+                *) echo "Unknown target: $target" >&2; continue ;;
+              esac
+              if [ "$FIRST" = true ]; then
+                FILTERED="$FILTERED$ENTRY"; FIRST=false
+              else
+                FILTERED="$FILTERED,$ENTRY"
+              fi
+            done
+            FILTERED="$FILTERED]}"
+            echo "matrix=$FILTERED" >> "$GITHUB_OUTPUT"
+          fi
+
+  build:
+    name: ${{ matrix.target_key }}
+    needs: setup-matrix
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: true
+      matrix: ${{ fromJson(needs.setup-matrix.outputs.matrix) }}
+
+    steps:
+    - name: Checkout
+      uses: actions/checkout@v4
+      with:
+        ref: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.ref || github.ref }}
+
+    # rust-toolchain.toml pins the exact toolchain (1.95.0); the runners'
+    # preinstalled rustup auto-installs it from the repo root cwd. No action
+    # needed here — deliberately, so a toolchain drift fails visibly as a
+    # rustup fetch rather than being papered over by a "stable" override.
+
+    - name: Cache cargo artifacts
+      uses: Swatinem/rust-cache@v2
+
+    # Linux: build libsodium 1.0.22 from source into /tmp/libsodium. The
+    # distro package is unusable for the STATIC flavour on aarch64 (Ubuntu
+    # 24.04 ships 1.0.18 without the ARM crypto extensions, and 1.0.21 does
+    # not compile on aarch64 with GCC — fixed in 1.0.22); source-building
+    # on both arches keeps the static flavour's primitives identical.
+    - name: Build libsodium 1.0.22 (Linux)
+      if: matrix.platform == 'linux'
+      run: |
+        set -euo pipefail
+        curl -fsSL -o /tmp/libsodium.tar.gz \
+          https://github.com/jedisct1/libsodium/releases/download/1.0.22-RELEASE/libsodium-1.0.22.tar.gz
+        # Checksum pinned from the 1.0.22-RELEASE asset; a mismatch aborts
+        # before anything is built or linked.
+        echo "adbdd8f16149e81ac6078a03aca6fc03b592b89ef7b5ed83841c086191be3349  /tmp/libsodium.tar.gz" | sha256sum -c
+        tar -C /tmp -xzf /tmp/libsodium.tar.gz
+        (cd /tmp/libsodium-1.0.22 \
+          && ./configure --prefix=/tmp/libsodium --disable-shared --enable-static \
+          && make -j"$(nproc)" && make install)
+        echo "PAXE_SODIUM_LIB_DIR=/tmp/libsodium/lib" >> "$GITHUB_ENV"
+
+    # The dynamic flavour links the SYSTEM sodium. On Linux that is the
+    # distro package — deliberately the WIDEST-compatible soname, so the
+    # published -system-sodium artefact loads on any maintained distro and
+    # fails fast (at init, never silently) where the distro build lacks the
+    # AES-GCM hardware path. macOS: Homebrew is the system provider.
+    - name: Install system libsodium (dynamic flavour provider)
+      run: |
+        set -euo pipefail
+        if [ "${{ matrix.platform }}" = "linux" ]; then
+          sudo apt-get update && sudo apt-get install -y libsodium-dev pkg-config
+        else
+          brew install libsodium
+        fi
+
+    # ----- Gate: fmt, clippy, suites, KAT, e2e — under the DEFAULT (static) features.
+
+    - name: Format check
+      shell: bash
+      run: cargo fmt -- --check
+
+    - name: Clippy
+      shell: bash
+      run: cargo clippy --all-targets -- -D warnings
+
+    - name: Test suite
+      shell: bash
+      run: cargo test --all-targets
+
+    # The known-answer integration test needs the kat feature's
+    # deterministic seal seams, which the default test run does not compile.
+    - name: Known-answer test (KAT)
+      shell: bash
+      run: cargo test --test kat_from_json --features kat
+
+    # Independent AES-256-GCM KAT: re-derives the vectors with OpenSSL EVP
+    # via Python cryptography. Runs on one Linux job — it validates the
+    # checked-in vectors, not the platform build.
+    - name: Independent AES-GCM KAT
+      if: matrix.os == 'ubuntu-latest'
+      run: |
+        pip3 install cryptography
+        bash tests/aes_gcm_kat.sh
+
+    # Two-node e2e over real sockets: the script is bash and drives the
+    # demo binary with nc.
+    - name: End-to-end test
+      shell: bash
+      run: |
+        cargo build --bins
+        bash tests/six_seven_e2e.sh
+
+    # ----- Dynamic flavour: gate the suite and build the artefact.
+    #
+    # On arm64 Linux the distro sodium (1.0.18) lacks the ARM crypto
+    # extensions, so the test suite there runs against the source-built
+    # 1.0.22 shared library via PKG_CONFIG_PATH + LD_LIBRARY_PATH — proving
+    # the dynamic flavour works when the host provides a proper sodium.
+    # The RELEASE artefact, however, is linked against the plain distro
+    # sodium (soname 23) so it loads on any maintained distro; where the
+    # distro build lacks AES-GCM the startup check fails fast, loudly.
+    - name: Test suite, system-sodium flavour
+      shell: bash
+      run: |
+        set -euo pipefail
+        if [ "${{ matrix.target_key }}" = "linux-arm64" ]; then
+          export PKG_CONFIG_PATH=/tmp/libsodium/lib/pkgconfig
+          export LD_LIBRARY_PATH=/tmp/libsodium/lib
+        fi
+        cargo clippy --all-targets --features sodium-dynamic -- -D warnings
+        cargo test --all-targets --features sodium-dynamic
+        cargo test --test kat_from_json --features "kat,sodium-dynamic"
+
+    - name: Build system-sodium release artefact
+      shell: bash
+      run: |
+        set -euo pipefail
+        cargo build --release --features sodium-dynamic
+        case "${{ matrix.platform }}" in
+          macos) ART=target/release/libpaxe.dylib; TOOL="otool -L" ;;
+          *)     ART=target/release/libpaxe.so;     TOOL=ldd ;;
+        esac
+        if [ ! -f "$ART" ]; then echo "missing artefact: $ART" >&2; exit 1; fi
+        # Dynamic flavour: the cdylib MUST carry the dynamic libsodium
+        # dependency — its absence means the feature silently did nothing.
+        if ! $TOOL "$ART" | grep -q sodium; then
+          echo "FAIL: system-sodium artefact has no dynamic libsodium dependency" >&2
+          exit 1
+        fi
+        echo "system-sodium cdylib OK: $ART"
+
+    # ----- Static flavour: release build + packaging.
+
+    - name: Build self-contained release artefact
+      shell: bash
+      run: cargo build --release
+
+    # Confirm the artefact under the expected per-platform name rather
+    # than assuming it (macOS dylib vs ELF .so).
+    - name: Verify self-contained artefact
+      shell: bash
+      run: |
+        set -euo pipefail
+        case "${{ matrix.platform }}" in
+          macos) ART=target/release/libpaxe.dylib; TOOL="otool -L" ;;
+          *)     ART=target/release/libpaxe.so;     TOOL=ldd ;;
+        esac
+        if [ ! -f "$ART" ]; then echo "missing artefact: $ART" >&2; exit 1; fi
+        # Static flavour: the cdylib must carry NO dynamic libsodium
+        # dependency; a regression that silently links the shared library
+        # fails here.
+        if $TOOL "$ART" | grep -q sodium; then
+          echo "FAIL: self-contained cdylib links libsodium dynamically" >&2
+          exit 1
+        fi
+        echo "self-contained cdylib OK (statically linked): $ART"
+
+    - name: Package release archives
+      run: |
+        set -euo pipefail
+        # Self-contained flavour: cdylib + staticlib, no runtime deps.
+        DIST="$(mktemp -d)"
+        case "${{ matrix.platform }}" in
+          macos) cp target/release/libpaxe.dylib "$DIST/" ;;
+          *)     cp target/release/libpaxe.so "$DIST/" ;;
+        esac
+        cp target/release/libpaxe.a "$DIST/" 2>/dev/null || true
+        cp LICENSE README.md PAXE.md "$DIST/"
+        tar -C "$DIST" -czf "paxe-core-${{ matrix.target_key }}.tar.gz" .
+        # System-sodium flavour: the cdylib only; the provider is the host OS.
+        # The artefact from the release build is in place (the static build
+        # above overwrote the same path, so re-stage the dynamic build —
+        # feature flip forces a rebuild).
+        cargo build --release --features sodium-dynamic
+        DIST2="$(mktemp -d)"
+        case "${{ matrix.platform }}" in
+          macos) cp target/release/libpaxe.dylib "$DIST2/" ;;
+          *)     cp target/release/libpaxe.so "$DIST2/" ;;
+        esac
+        cp LICENSE README.md PAXE.md "$DIST2/"
+        tar -C "$DIST2" -czf "paxe-core-${{ matrix.target_key }}-system-sodium.tar.gz" .
+
+    - name: Upload release archives
+      uses: actions/upload-artifact@v4
+      with:
+        name: release-${{ matrix.target_key }}
+        path: |
+          paxe-core-*.tar.gz
+          paxe-core-*.zip
+
+  publish-release:
+    name: Publish release
+    if: startsWith(github.ref, 'refs/tags/v') || (github.event_name == 'workflow_dispatch' && startsWith(github.event.inputs.ref, 'v'))
+    needs: [build]
+    runs-on: blacksmith-4vcpu-ubuntu-2404
+    steps:
+    - name: Download release archives
+      uses: actions/download-artifact@v4
+      with:
+        pattern: release-*
+        merge-multiple: true
+        path: release-assets
+
+    - name: Verify expected archives
+      run: |
+        set -euo pipefail
+        for target in linux-amd64 linux-arm64 macos; do
+          test -f "release-assets/paxe-core-$target.tar.gz" || {
+            echo "missing release asset: paxe-core-$target.tar.gz" >&2; exit 1
+          }
+          test -f "release-assets/paxe-core-$target-system-sodium.tar.gz" || {
+            echo "missing release asset: paxe-core-$target-system-sodium.tar.gz" >&2; exit 1
+          }
+        done
+
+    - name: Create GitHub release
+      uses: softprops/action-gh-release@v2
+      with:
+        generate_release_notes: true
+        files: |
+          release-assets/paxe-core-linux-amd64.tar.gz
+          release-assets/paxe-core-linux-arm64.tar.gz
+          release-assets/paxe-core-macos.tar.gz
+          release-assets/paxe-core-linux-amd64-system-sodium.tar.gz
+          release-assets/paxe-core-linux-arm64-system-sodium.tar.gz
+          release-assets/paxe-core-macos-system-sodium.tar.gz

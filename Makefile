@@ -12,21 +12,29 @@
 # platforms above. The kat and docker-gate targets need the `cryptography`
 # Python package (pip3 install cryptography) and docker respectively.
 
-.PHONY: help build check test test-e2e test-kat test-kat-independent fmt clippy clean docker-gate docker-regen
+.PHONY: help build build-dynamic check test test-e2e test-kat test-kat-independent fmt clippy clean docker-gate docker-regen
 
 help:
-	@echo "make test        - the Rust test suite"
-	@echo "make test-e2e    - two real nodes over real sockets, forwarding over PAXE"
-	@echo "make test-kat    - the AES-256-GCM known-answer test from the JSON fixture"
-	@echo "make check       - fmt, clippy, the Rust suite, the KAT and the e2e run"
-	@echo "make build       - release-build the cdylib, staticlib and the demo server"
-	@echo "make docker-gate - the full gate in a Debian trixie container (colima/aarch64)"
-	@echo "make docker-regen- regenerate tests/aes_gcm_vectors.json in the container"
-	@echo "make fmt         - rustfmt in place"
-	@echo "make clean       - cargo clean, and drop .tmp run logs"
+	@echo "make test          - the Rust test suite"
+	@echo "make test-e2e      - two real nodes over real sockets, forwarding over PAXE"
+	@echo "make test-kat      - the AES-256-GCM known-answer test from the JSON fixture"
+	@echo "make check         - fmt, clippy, the Rust suite, the KAT and the e2e run"
+	@echo "make build         - release-build the cdylib, staticlib and the demo server"
+	@echo "make build-dynamic - release-build the cdylib against the SYSTEM libsodium"
+	@echo "make docker-gate   - the full gate in a Debian trixie container (colima/aarch64)"
+	@echo "make docker-regen  - regenerate tests/aes_gcm_vectors.json in the container"
+	@echo "make fmt           - rustfmt in place"
+	@echo "make clean         - cargo clean, and drop .tmp run logs"
 
 build:
 	cargo build --release --all-targets
+
+# The system-sodium flavour: links the OS libsodium dynamically. Unix only;
+# on Windows the build script rejects the feature. Needs pkg-config to know
+# libsodium (libsodium-dev / brew install libsodium). See README.md for the
+# tradeoffs between the two flavours.
+build-dynamic:
+	cargo build --release --features sodium-dynamic
 
 test:
 	cargo test

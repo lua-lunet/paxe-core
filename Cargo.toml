@@ -1,6 +1,6 @@
 [package]
 name = "paxe-core"
-version = "0.2.0"
+version = "0.3.0"
 # Edition 2021, deliberately not 2024: this crate has zero dependencies and
 # needs nothing from the newer edition, and 2021 keeps the toolchain floor
 # low and the unsafe-attribute syntax simple (#[no_mangle], not
@@ -37,6 +37,15 @@ path = "src/bin/six-seven-server/main.rs"
 # its own `lunet_paxe_*` symbols must turn it off.
 default = ["ffi"]
 ffi = []
+# Link the SYSTEM libsodium dynamically instead of the default static
+# archive. Unix only — the build script rejects the feature on Windows,
+# which has no system libsodium provider. The two artefact flavours are
+# published together in every release and the tradeoffs (OS security
+# patches vs a pinned, self-contained build) are documented in README.md;
+# neither is recommended over the other. Whatever the linkage, the
+# first `lunet_paxe_init` verifies the linked library and fails fast on
+# any mismatch, so a wrong distro sodium dies loudly, not silently.
+sodium-dynamic = []
 # Exposes the deterministic (caller-supplied-nonce) seal seams so the
 # integration test in tests/kat_from_json.rs can reproduce the known-answer
 # frames from the JSON fixture. Off by default: the seams are test-only

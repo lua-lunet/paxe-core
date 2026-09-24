@@ -44,8 +44,16 @@
 //!
 //! This crate has **no** crate dependencies — not even `libc`. All
 //! cryptography and all secure-memory handling comes from libsodium via
-//! hand-written `extern "C"` declarations in [`sodium`], **statically
-//! linked into this cdylib** by `build.rs`:
+//! hand-written `extern "C"` declarations in [`sodium`]. Two link modes,
+//! both first-class (see `build.rs` and README.md for the tradeoffs; the
+//! project recommends neither over the other):
+//!
+//! - **Static** (default): the libsodium archive is linked into this
+//!   cdylib, which is self-contained and pinned to one sodium build.
+//! - **`sodium-dynamic`**: the cdylib links the system libsodium and
+//!   inherits its security and performance updates; the host must provide
+//!   libsodium.
+//!
 //! `sodium_malloc` / `sodium_mlock` / `sodium_memzero` provide guarded,
 //! locked, reliably-zeroed key storage, which is exactly where
 //! sysadmin-injected shared cluster keys belong.
@@ -83,8 +91,9 @@
 //! written at the declaration, and exposes safe wrappers: fixed-size
 //! key/nonce/tag newtypes, slice-derived pointer+length pairs, a startup
 //! ABI size check, CSPRNG-only nonce generation, guarded allocations, and
-//! AES-GCM unavailability as a reportable error. libsodium is statically
-//! linked into this cdylib by `build.rs`.
+//! AES-GCM unavailability as a reportable error. libsodium is linked per
+//! the selected mode (static by default; `sodium-dynamic` links the
+//! system library).
 
 // Every module except sodium.rs is plain safe Rust; unsafe is denied here
 // and re-allowed by inner attribute inside sodium.rs alone.
@@ -96,6 +105,11 @@ pub mod keystore;
 pub mod sodium;
 pub mod standard;
 pub mod stats;
+
+// The one-call startup contract, re-exported at the crate root: every Rust
+// host runs `paxe::startup_check()` at startup and treats `Err` as fatal
+// for PAXE. C-ABI hosts run `lunet_paxe_init` — the same chain.
+pub use sodium::startup_check;
 // Known-answer vectors exist ONLY in test builds: the whole
 // module is test code pinned against the #[cfg(test)] deterministic
 // seams, so it is compiled out of every non-test build by construction.

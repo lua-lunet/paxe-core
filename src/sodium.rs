@@ -71,7 +71,7 @@ mod ffi {
         ///
         /// 0 happens on real platforms: Debian trixie arm64 ships a
         /// libsodium built WITHOUT the ARM crypto-extension path even on
-        /// CPUs that expose it (documented in docker/gate.sh). Callers
+        /// CPUs that expose it (see tests/Dockerfile.aes_gcm). Callers
         /// MUST surface 0 as an error the operator can see — never panic
         /// (panic = abort kills the LuaJIT host) and never silently fall
         /// back to a different cipher (that breaks wire compatibility).
@@ -507,9 +507,8 @@ pub enum SodiumError {
     /// surfaced as a clear error instead of a buffer overflow.
     AbiMismatch(&'static str, usize, usize),
     /// `crypto_aead_aes256gcm_is_available()` returned 0: this CPU or
-    /// this libsodium build lacks the hardware AES-GCM path (e.g. Debian
-    /// trixie arm64; see docker/gate.sh). Reportable — never a panic,
-    /// never a silent cipher substitution.
+    /// this libsodium build lacks the hardware AES-GCM path. Reportable —
+    /// never a panic, never a silent cipher substitution.
     AesGcmUnavailable,
     /// AEAD tag verification failed: wrong key, nonce or AAD, or a
     /// corrupted/forged ciphertext. The output buffer was wiped.
@@ -539,7 +538,11 @@ impl fmt::Display for SodiumError {
             ),
             SodiumError::AesGcmUnavailable => write!(
                 f,
-                "AES-256-GCM unavailable: no hardware crypto path in this libsodium build/CPU"
+                "AES-256-GCM unavailable: this libsodium build or CPU has \
+                 no hardware crypto path. Some distro builds ship without \
+                 it (e.g. Debian trixie arm64, Ubuntu 24.04 arm64); use a \
+                 libsodium with the ARM crypto extensions (>= 1.0.20) or \
+                 the self-contained build of this crate"
             ),
             SodiumError::AuthFailed => write!(f, "authentication failed"),
             SodiumError::InvalidLength => write!(f, "invalid buffer length"),
@@ -707,6 +710,26 @@ pub fn require_aes_gcm() -> Result<(), SodiumError> {
     } else {
         Err(SodiumError::AesGcmUnavailable)
     }
+}
+
+/// The startup contract, in one call: initialise libsodium, verify the
+/// ABI sizes, and require the hardware AES-256-GCM path. Returns the
+/// linked library's version string (e.g. "1.0.22") on success.
+///
+/// APPLICATION REQUIREMENT: every host calls this — or the C-ABI
+/// `lunet_paxe_init`, which runs the same chain — at STARTUP, before the
+/// first network operation, and treats `Err` as fatal for PAXE (refuse to
+/// enable it; surface the error to the operator). This is when a broken
+/// environment is ALLOWED to be discovered: a distro libsodium without
+/// the ARM crypto extensions, an ABI drift, a sodium that cannot
+/// initialise. Discovering any of these at first packet is too late; the
+/// check is cheap and idempotent, so there is no reason to defer it.
+/// Never panics, never substitutes a weaker cipher.
+pub fn startup_check() -> Result<&'static str, SodiumError> {
+    init()?;
+    check_sizes()?;
+    require_aes_gcm()?;
+    Ok(version_string())
 }
 
 // ---------------------------------------------------------------------------
@@ -988,6 +1011,14 @@ mod tests {
             second,
             InitStatus::Fresh | InitStatus::AlreadyInitialised
         ));
+    }
+
+    #[test]
+    fn startup_check_runs_the_full_contract_and_is_idempotent() {
+        let first = startup_check().expect("startup_check failed");
+        assert!(first.starts_with('1'), "implausible version: {first}");
+        let second = startup_check().expect("second startup_check failed");
+        assert_eq!(first, second);
     }
 
     #[test]
