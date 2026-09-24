@@ -103,6 +103,17 @@ jobs:
     # needed here — deliberately, so a toolchain drift fails visibly as a
     # rustup fetch rather than being papered over by a "stable" override.
 
+    # rust-toolchain.toml pins the exact toolchain (1.95.0); the runners'
+    # preinstalled rustup auto-installs it from the repo root cwd — but in
+    # the minimal profile, which omits rustfmt and clippy. Add the
+    # components the gate needs (same as tests/Dockerfile.aes_gcm does).
+    - name: Install toolchain components
+      shell: bash
+      run: |
+        set -euo pipefail
+        # rustup resolves the pinned toolchain from the repo root cwd.
+        (cd . && rustup component add rustfmt clippy)
+
     - name: Cache cargo artifacts
       uses: Swatinem/rust-cache@v2
 
