@@ -1,6 +1,6 @@
 [package]
 name = "paxe-core"
-version = "0.1.0"
+version = "0.2.0"
 # Edition 2021, deliberately not 2024: this crate has zero dependencies and
 # needs nothing from the newer edition, and 2021 keeps the toolchain floor
 # low and the unsafe-attribute syntax simple (#[no_mangle], not
