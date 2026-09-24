@@ -315,6 +315,45 @@ jobs:
       uses: softprops/action-gh-release@v2
       with:
         generate_release_notes: true
+        # The flavour explanation IS the release notes: without them the
+        # asset list is six opaque tarballs and the consumer has to go
+        # read README.md to learn which one to pick.
+        body: |
+          ## Which archive do I want?
+
+          Every tag publishes the cdylib in **two flavours**, per platform. They
+          are tradeoffs, and the project makes **no recommendation** between
+          them — pick according to how you deploy (README.md, "Two build
+          flavours", has the full contract and the startup-check requirement
+          that applies to both).
+
+          **Self-contained** — `paxe-core-<target>.tar.gz`
+
+          libsodium is linked **statically** into the cdylib. No runtime
+          dependency; the sodium version is the one the build pinned. Deploy
+          anywhere with nothing installed. Security and performance fixes in
+          libsodium reach you only when a new release of this crate is cut and
+          you redeploy it.
+
+          **System-sodium** — `paxe-core-<target>-system-sodium.tar.gz`
+
+          The cdylib links the operating system's libsodium dynamically. Security
+          and performance fixes arrive via the OS package update train — no new
+          release of this crate, no redeployment. The host must have libsodium
+          installed, and runs whatever the OS provides: a distro build without
+          the hardware AES-256-GCM path (e.g. Ubuntu 24.04 / Debian trixie
+          arm64) fails fast at `init()` rather than silently degrading. Unix
+          only — there is no system libsodium on Windows.
+
+          **Targets:** `linux-amd64` and `linux-arm64` are the release target.
+          macOS is best-effort (local-development parity); its system-sodium
+          artefact links whatever Homebrew ships at build time.
+
+          Call the startup check (`lunet_paxe_init` from the C ABI;
+          `paxe::startup_check()` from Rust) before the first network
+          operation and treat failure as fatal for PAXE — that is the
+          contract that makes a wrong environment surface immediately, with a
+          named cause, before any traffic flows.
         files: |
           release-assets/paxe-core-linux-amd64.tar.gz
           release-assets/paxe-core-linux-arm64.tar.gz
