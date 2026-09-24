@@ -9,8 +9,8 @@
 //! prefix codec, guarded keystore, and safe AEAD wrappers. Tests emphasize
 //! properties a
 //! self-round-trip CANNOT establish: that the AAD really covers all 9
-//! bytes (tamper tests under identical key material), that the length
-//! field is validated against the actual datagram size on both sides, and
+//! bytes (tamper tests under identical key material), that truncated and
+//! extended datagrams are rejected by the AEAD, and
 //! that the key is selected by the right peer field (two DISTINCT node
 //! ids — a transposed lookup is invisible in a same-id loopback).
 //!
@@ -27,18 +27,15 @@
 //! would be possible and every round-trip test would still pass; with one
 //! shared borrow it is not. DEK mode reuses this same function.
 //!
-//! ## Length validation is two-sided, and both sides are here
+//! ## Payload length is derived from datagram geometry
 //!
-//! The prefix codec deliberately does not check `length` against the datagram size,
-//! because the expected size depends on the mode's overhead. That check
-//! lives here for standard mode:
-//!
-//! - **Seal**: the payload must fit [`MAX_PAYLOAD`] (65507 − 37 = 65470,
-//!   PAXE.md "Limits"). An oversized payload is a REPORTABLE error —
-//!   never a truncated length field.
-//! - **Open**: the frame's actual size must equal the declared length +
-//!   37 EXACTLY, checked BEFORE the AEAD call, because the declared length
-//!   determines the ciphertext slice bounds.
+//! The prefix carries no length field. The payload length is derived on
+//! receive from the datagram size: `frame.len() - OVERHEAD`. A frame
+//! shorter than `OVERHEAD` is rejected before the AEAD call. Truncated
+//! and extended datagrams produce a ciphertext whose GCM tag does not
+//! verify, so both are rejected without yielding plaintext. Seal rejects
+//! oversized payloads (> [`MAX_PAYLOAD`]) with a reportable typed error
+//! before any ciphertext is written.
 //!
 //! ## Key selection: `toId` on seal, `fromId` on open
 //!
@@ -225,7 +222,7 @@ impl Error for OpenError {}
 pub fn seal(
     store: &KeyStore,
     to_id: u16,
-    channel: u16,
+    channel: u32,
     epoch: Epoch,
     payload: &[u8],
     out: &mut [u8],
@@ -251,7 +248,7 @@ pub fn seal(
 fn seal_core(
     store: &KeyStore,
     to_id: u16,
-    channel: u16,
+    channel: u32,
     epoch: Epoch,
     payload: &[u8],
     nonce: &Nonce,
@@ -288,7 +285,6 @@ fn seal_core(
         from_id: store.local_id(),
         to_id,
         channel,
-        length: payload.len() as u16,
     };
     // Standard mode only: the DEK bit is always 0.
     let flags = Flags::new(Mode::Standard, epoch);
@@ -366,13 +362,13 @@ pub fn open(
         return Err(OpenError::Rejected);
     }
 
-    // Declared-vs-actual size gate, BEFORE the AEAD call: the declared
-    // length fixes the ciphertext slice bounds, so it must be validated
-    // first (the prefix codec leaves this check to the mode layer).
-    // EXACT equality: a frame that claims a length inconsistent with its
-    // own size is rejected. u16 + 37 <= 65572, so no overflow is possible.
-    let declared = header.length as usize;
-    if frame.len() != declared + OVERHEAD {
+    // Geometry gate, BEFORE the AEAD call: the frame must be at least
+    // OVERHEAD bytes (9-byte prefix + 12-byte nonce + 16-byte tag).
+    // After this check, payload_len = frame.len() - OVERHEAD is the
+    // derived plaintext length; there is no declared length in the prefix.
+    // A truncated or extended datagram produces a ciphertext whose GCM tag
+    // does not verify, ensuring rejection without yielding plaintext.
+    if frame.len() < OVERHEAD {
         stats::record_reject(RejectReason::LenMismatch);
         return Err(OpenError::Rejected);
     }
@@ -449,11 +445,11 @@ pub fn open(
 /// span and frame geometry byte-for-byte against fixed inputs. Reaches
 /// the identical [`seal_core`] the production path uses — the only
 /// difference is where the nonce comes from.
-#[cfg(test)]
-pub(crate) fn seal_standard_deterministic(
+#[cfg(any(test, feature = "kat"))]
+pub fn seal_standard_deterministic(
     store: &KeyStore,
     to_id: u16,
-    channel: u16,
+    channel: u32,
     epoch: Epoch,
     payload: &[u8],
     nonce: [u8; NPUBBYTES],
@@ -580,8 +576,7 @@ mod tests {
                 assert_eq!(out, payload, "byte-exact payload for {n}");
                 assert_eq!(header.from_id, LOCAL);
                 assert_eq!(header.to_id, LOCAL);
-                assert_eq!(header.channel, 100);
-                assert_eq!(header.length as usize, n);
+                assert_eq!(header.channel, 100u32);
                 // The returned flags: standard mode, DEK bit 0, epoch 3.
                 assert_eq!(flags, Flags::new(Mode::Standard, ep(3)));
                 assert_eq!(flags.mode(), Mode::Standard);
@@ -603,8 +598,10 @@ mod tests {
         let mut frame = vec![0u8; payload.len() + OVERHEAD];
         let written = seal(&ks, LOCAL, 100, ep(5), &payload, &mut frame).expect("seal");
         assert_eq!(written, 37 + OVERHEAD);
-        // Header big-endian, field order fromId|toId|channel|length.
-        assert_eq!(&frame[0..8], &[0, 100, 0, 100, 0, 100, 0, 37]);
+        // Header big-endian, field order fromId|toId|channel.
+        // from_id = LOCAL (100) = 0x0064, to_id = LOCAL = 0x0064,
+        // channel = 100 = 0x00000064
+        assert_eq!(&frame[0..8], &[0, 100, 0, 100, 0, 0, 0, 100]);
         // Flags: DEK bit 0, fixed pattern 01, epoch 5 -> 0x2C.
         assert_eq!(frame[8], 0x2C);
         assert_eq!(frame[8] & 0x01, 0, "standard mode: DEK bit is 0");
@@ -619,8 +616,7 @@ mod tests {
             Header {
                 from_id: 100,
                 to_id: 100,
-                channel: 100,
-                length: 37
+                channel: 100
             }
         );
         assert_eq!(f, Flags::new(Mode::Standard, ep(5)));
@@ -705,27 +701,21 @@ mod tests {
         let mut t = frame.clone();
         t[3] ^= 0x01;
         assert_rejected(&t);
-        // Byte 4: channel high byte.
+        // Byte 4: channel byte 0 (high).
         let mut t = frame.clone();
         t[4] ^= 0x01;
         assert_rejected(&t);
-        // Byte 5: channel low byte.
+        // Byte 5: channel byte 1.
         let mut t = frame.clone();
         t[5] ^= 0x01;
         assert_rejected(&t);
-        // Byte 6: length high byte — also caught by the size gate.
+        // Byte 6: channel byte 2.
         let mut t = frame.clone();
         t[6] ^= 0x01;
         assert_rejected(&t);
-        // Byte 7: length low byte. A bare flip is caught by the
-        // declared-vs-actual size gate, so to exercise the tag's coverage
-        // of this byte the frame is resized to match the new declaration:
-        // the size gate then PASSES and only the AEAD (AAD over the
-        // changed length byte, plus the shifted tag) can reject it.
+        // Byte 7: channel byte 3 (low).
         let mut t = frame.clone();
-        t[7] ^= 0x01; // declared 64 -> 65
-        t.push(0x00); // actual size now equals declared + 37
-        assert_eq!(t.len(), 65 + OVERHEAD);
+        t[7] ^= 0x01;
         assert_rejected(&t);
         // Byte 8: THE flags byte — the byte an "8-byte AAD" bug would
         // miss. Epoch 5 -> 1 with the SAME material installed under both
@@ -766,17 +756,14 @@ mod tests {
         }
         let ks = loopback_store(0x33);
         // The documented maximum SEALS, fills the datagram to exactly the
-        // UDP ceiling, and the length field carries it exactly
-        // (65470 < 65536: no truncation).
+        // UDP ceiling.
         let max_payload = vec![0xABu8; MAX_PAYLOAD];
         let mut frame = vec![0u8; MAX_PAYLOAD + OVERHEAD];
         let written = seal(&ks, LOCAL, 100, ep(3), &max_payload, &mut frame).expect("max seals");
         assert_eq!(written, MAX_UDP_DATAGRAM);
-        assert_eq!(&frame[6..8], &65470u16.to_be_bytes());
         let mut out = vec![0u8; MAX_PAYLOAD];
-        let (header, _, plen) = open(&ks, &frame, &mut out).expect("max opens");
+        let (_, _, plen) = open(&ks, &frame, &mut out).expect("max opens");
         assert_eq!(plen, MAX_PAYLOAD);
-        assert_eq!(header.length as usize, MAX_PAYLOAD);
         assert!(out.iter().all(|&b| b == 0xAB));
 
         // One byte over the maximum is a typed, reportable error...
@@ -786,8 +773,7 @@ mod tests {
             seal(&ks, LOCAL, 100, ep(3), &over, &mut scratch),
             Err(SealError::PayloadTooLarge(MAX_PAYLOAD + 1))
         );
-        // Values that would truncate a u16 length field (70000 -> 4464)
-        // are also rejected without writing output.
+        // Values well over the maximum are also rejected without writing output.
         let big = vec![0u8; 70000];
         assert_eq!(
             seal(&ks, LOCAL, 100, ep(3), &big, &mut scratch),
@@ -800,7 +786,7 @@ mod tests {
     }
 
     #[test]
-    fn open_rejects_frames_whose_size_disagrees_with_declared_length() {
+    fn open_rejects_truncated_and_short_frames() {
         if !gcm_or_skip() {
             return;
         }
@@ -809,7 +795,9 @@ mod tests {
         let mut frame = vec![0u8; payload.len() + OVERHEAD];
         seal(&ks, LOCAL, 100, ep(3), &payload, &mut frame).expect("seal");
 
-        // Actual < declared + 37 (truncated datagram), down to nothing.
+        // Truncated datagrams: AEAD fails for any cut inside the ciphertext
+        // or at the geometry boundary; prefix-only cuts fail the minimum-
+        // size gate. All are rejected uniformly.
         for cut in [frame.len() - 1, frame.len() - 16, PREFIX_LEN, 8, 0] {
             let mut out = vec![0u8; payload.len()];
             assert_eq!(
@@ -818,10 +806,11 @@ mod tests {
                 "cut to {cut} bytes"
             );
         }
-        // Actual > declared + 37 (padded datagram).
+        // Extended datagram: the receiver interprets the datagram as a
+        // longer payload and the AEAD tag fails.
         let mut padded = frame.clone();
         padded.push(0x00);
-        let mut out = vec![0u8; payload.len()];
+        let mut out = vec![0u8; payload.len() + 1]; // one byte larger to avoid buffer error
         assert_eq!(open(&ks, &padded, &mut out), Err(OpenError::Rejected));
 
         // All-zero and all-ones garbage dies at the flags filter.
@@ -845,7 +834,6 @@ mod tests {
             from_id: LOCAL,
             to_id: LOCAL,
             channel: 100,
-            length: 10,
         };
         let prefix = codec::serialize_prefix(&header, &Flags::new(Mode::Dek, ep(3)));
         assert_eq!(prefix[8] & 0x01, 1, "constructed frame really is DEK-mode");

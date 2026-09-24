@@ -1,0 +1,40 @@
+{
+  "schema": 1,
+  "generator": "tests/gen_aes_gcm_vectors.py (independent OpenSSL EVP via Python cryptography)",
+  "note": "Expected frames are computed by an independent AES-256-GCM implementation, not by the paxe crate. The Rust test loads this file and checks the crate's own output against it.",
+  "standard": {
+    "psk_hex": "a1b2c3d4e5f60718293a4b5c6d7e8f90132435465768798a9bacbdcedfe0f102",
+    "from_id": 2571,
+    "to_id": 3085,
+    "channel": 3599,
+    "epoch": 9,
+    "nonce_hex": "c0c1c2c3c4c5c6c7c8c9cacb",
+    "plaintext_hex": "7061786520766563746f722076323a207374616e646172642073686f7274207061796c6f6164",
+    "aad_hex": "0a0b0c0d00000e0f4c",
+    "frame_hex": "0a0b0c0d00000e0f4cc0c1c2c3c4c5c6c7c8c9cacb11e08e8e015385ddbc7e771d411ecffe2a26717d89c5bc800ee4e33262fe2f6d78a58b8a02e23c46700ed4190d85d57aa0d74052b6ea"
+  },
+  "fanout": {
+    "from_id": 2571,
+    "channel": 3599,
+    "payload_hex": "6669786564207265757361626c652d44454b20766563746f72",
+    "dek_hex": "e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0",
+    "body_nonce_hex": "d0d0d0d0d0d0d0d0d0d0d0d0",
+    "body_aad_hex": "0a0b00000e0f05",
+    "recipients": [
+      {
+        "to_id": 3085,
+        "epoch": 9,
+        "psk_hex": "a1b2c3d4e5f60718293a4b5c6d7e8f90132435465768798a9bacbdcedfe0f102",
+        "envelope_nonce_hex": "b0b0b0b0b0b0b0b0b0b0b0b0",
+        "frame_hex": "0a0b0c0d00000e0f4db0b0b0b0b0b0b0b0b0b0b0b0c665b11725373b2d9daf03c359fb50ae3cc278c30626f74b0f7b18a58e3adf15d75fb9dfb2a29beb0d08bea78e4c207bd0d0d0d0d0d0d0d0d0d0d0d05187e7d3f6791322348227884ecce454c12d780f76a3e7020e4410681f921c4c96cfbd93f92384fdbd"
+      },
+      {
+        "to_id": 3086,
+        "epoch": 8,
+        "psk_hex": "5555555555555555555555555555555555555555555555555555555555555555",
+        "envelope_nonce_hex": "b1b1b1b1b1b1b1b1b1b1b1b1",
+        "frame_hex": "0a0b0c0e00000e0f45b1b1b1b1b1b1b1b1b1b1b1b173e405815863bcfc7997415ba535082c35316fd14fa1a3011d2102dc8589fa80852e550a6cc330ee9418d9165e7ae43ed0d0d0d0d0d0d0d0d0d0d0d05187e7d3f6791322348227884ecce454c12d780f76a3e7020e4410681f921c4c96cfbd93f92384fdbd"
+      }
+    ]
+  }
+}

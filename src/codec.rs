@@ -1,27 +1,27 @@
 //! The header and flags codec: total, cryptography-free parsing
 //! and serialisation of the 9-byte frame prefix that leads every PAXE
-//! datagram — the 8-byte header (`fromId | toId | channel | length`,
-//! big-endian) and the 1-byte flags — parsed from attacker-controlled
-//! input before any key is looked up and before any cryptography runs.
+//! datagram — the 8-byte header (`fromId | toId | channel`, big-endian)
+//! and the 1-byte flags — parsed from attacker-controlled input before
+//! any key is looked up and before any cryptography runs.
 //!
 //! This code runs on every unsolicited datagram, including malformed and
-//! hostile ones. It accepts only the documented header layout, validates
-//! the fixed flag bits, and represents the wire length as a bounded `u16`.
+//! hostile ones. It accepts only the documented header layout and validates
+//! the fixed flag bits.
 //!
 //! ## Wire layout (PAXE.md is authoritative)
 //!
 //! ```text
 //! bytes 0-1   fromId    u16 BE   source node identifier
 //! bytes 2-3   toId      u16 BE   destination node identifier
-//! bytes 4-5   channel   u16 BE   channel identifier (multiplexing)
-//! bytes 6-7   length    u16 BE   PLAINTEXT payload length (NOT frame length)
+//! bytes 4-7   channel   u32 BE   channel identifier (multiplexing)
 //! byte  8     flags     u8       bit0: DEK | bit1: must be 0 |
 //!                                bit2: must be 1 | bits3-7: key epoch 0-31
 //! ```
 //!
-//! `length` is the length of the plaintext payload, not of the frame on
-//! the wire; the frame is longer by the mode's per-frame overhead (37 or
-//! 97 bytes).
+//! Payload length is not carried in the prefix. It is derived by the mode
+//! implementations from the received datagram length minus the fixed
+//! per-mode frame overhead. A truncated or extended datagram fails the
+//! AEAD/geometry checks rather than yielding accepted plaintext.
 //!
 //! ## Totality: no panic on ANY input (hard requirement)
 //!
@@ -35,9 +35,10 @@
 //! - The 9-byte prefix is obtained with a single fixed-size slice pattern
 //!   behind `slice::get` — there is no indexing, no slicing, and no
 //!   `unwrap`/`expect` anywhere in this module.
-//! - Integer decoding uses only `u16::from_be_bytes` / `u16::to_be_bytes`
-//!   on fixed-size arrays: explicit byte-order functions, no hand-rolled
-//!   shifts, and no arithmetic on untrusted values that could overflow.
+//! - Integer decoding uses only `u16::from_be_bytes` / `u32::from_be_bytes`
+//!   / `u16::to_be_bytes` / `u32::to_be_bytes` on fixed-size arrays:
+//!   explicit byte-order functions, no hand-rolled shifts, and no
+//!   arithmetic on untrusted values that could overflow.
 //! - The only fallible steps (short input, flags constant bits) are
 //!   checked explicitly and returned as typed errors.
 //!
@@ -63,11 +64,6 @@
 //!
 //! ## Type-level guarantees (made impossible, not merely checked)
 //!
-//! - **Length cannot truncate.** [`Header::length`] is a `u16` and the
-//!   encode path takes a `u16`, so a value exceeding 16 bits is
-//!   unrepresentable. The payload-size bounds (PAXE.md "Limits": 65470
-//!   standard / 65410 reusable-DEK) are enforced by the mode implementations before
-//!   a `Header` is constructed.
 //! - **Epoch out of range is unrepresentable.** [`Flags`] reuses the
 //!   keystore's [`Epoch`] newtype, whose only constructor rejects values
 //!   above 31. Serialising shifts the guaranteed-≤31 value into bits 3-7;
@@ -79,19 +75,18 @@
 //!   [`Flags::to_byte`]. They are not part of the public type, so no
 //!   caller can set them by hand.
 //!
-//! ## Deliberate boundary: `length` vs datagram size is NOT checked here
+//! ## Deliberate boundary: payload length vs datagram size is NOT checked here
 //!
 //! This codec validates ONLY the structural well-formedness of the 9-byte
-//! prefix. It deliberately does NOT compare `length` against the actual
-//! datagram size: the expected frame size depends on the mode's per-frame
-//! overhead (37 or 97 bytes), which is selected by the flags byte. The
-//! standard and DEK open paths enforce exact length-versus-frame geometry.
+//! prefix. Payload length is not in the prefix; it is derived by the mode
+//! implementations from the received datagram length minus the per-mode
+//! frame overhead. The mode layer enforces exact geometry.
 
 use crate::keystore::Epoch;
 use std::error::Error;
 use std::fmt;
 
-/// Header size in bytes: four big-endian u16 fields.
+/// Header size in bytes: two u16 fields plus one u32 field.
 pub const HEADER_LEN: usize = 8;
 
 /// Offset of the flags byte: immediately after the header.
@@ -121,7 +116,7 @@ pub enum Mode {
     Dek,
 }
 
-/// The parsed 8-byte header. All four fields are plain `u16` — any bit
+/// The parsed 8-byte header. All fields are plain integers — any bit
 /// pattern is structurally valid, so decoding is infallible.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct Header {
@@ -129,36 +124,29 @@ pub struct Header {
     pub from_id: u16,
     /// Destination node identifier (wire bytes 2-3, big-endian).
     pub to_id: u16,
-    /// Channel identifier (wire bytes 4-5, big-endian).
-    pub channel: u16,
-    /// PLAINTEXT payload length in bytes (wire bytes 6-7, big-endian) —
-    /// NOT the frame length. Being a `u16`, a value exceeding 16 bits is
-    /// unrepresentable on encode. The mode implementations bound the
-    /// payload before constructing a `Header`.
-    pub length: u16,
+    /// Channel identifier (wire bytes 4-7, big-endian).
+    pub channel: u32,
 }
 
 impl Header {
-    /// Serialise as 8 big-endian bytes: `fromId | toId | channel | length`.
+    /// Serialise as 8 big-endian bytes: `fromId | toId | channel`.
     /// Infallible: fixed arrays, explicit endian conversion, no arithmetic.
     pub fn to_bytes(&self) -> [u8; HEADER_LEN] {
         let [f0, f1] = self.from_id.to_be_bytes();
         let [t0, t1] = self.to_id.to_be_bytes();
-        let [c0, c1] = self.channel.to_be_bytes();
-        let [l0, l1] = self.length.to_be_bytes();
-        [f0, f1, t0, t1, c0, c1, l0, l1]
+        let [c0, c1, c2, c3] = self.channel.to_be_bytes();
+        [f0, f1, t0, t1, c0, c1, c2, c3]
     }
 
     /// Decode 8 big-endian bytes. Infallible: every 8-byte sequence is a
     /// structurally valid header; the only validated part of the prefix is
     /// the flags byte, checked separately in [`Flags::from_byte`].
     pub fn from_bytes(bytes: [u8; HEADER_LEN]) -> Self {
-        let [f0, f1, t0, t1, c0, c1, l0, l1] = bytes;
+        let [f0, f1, t0, t1, c0, c1, c2, c3] = bytes;
         Header {
             from_id: u16::from_be_bytes([f0, f1]),
             to_id: u16::from_be_bytes([t0, t1]),
-            channel: u16::from_be_bytes([c0, c1]),
-            length: u16::from_be_bytes([l0, l1]),
+            channel: u32::from_be_bytes([c0, c1, c2, c3]),
         }
     }
 }
@@ -278,8 +266,8 @@ pub fn parse_prefix(bytes: &[u8]) -> Result<(Header, Flags), CodecError> {
     // iff exactly the 9 prefix bytes are present, binds them without any
     // indexing, and no other code path touches the input.
     let (header_bytes, flags_byte) = match bytes.get(..PREFIX_LEN) {
-        Some(&[f0, f1, t0, t1, c0, c1, l0, l1, flags_byte]) => {
-            ([f0, f1, t0, t1, c0, c1, l0, l1], flags_byte)
+        Some(&[f0, f1, t0, t1, c0, c1, c2, c3, flags_byte]) => {
+            ([f0, f1, t0, t1, c0, c1, c2, c3], flags_byte)
         }
         _ => return Err(CodecError::TooShort(bytes.len())),
     };
@@ -380,15 +368,13 @@ mod tests {
         let prefix = [
             0x00, 0x01, // fromId = 1
             0x00, 0x02, // toId = 2
-            0x00, 0x64, // channel = 100
-            0x00, 0x40, // length = 64 (plaintext payload length)
+            0x00, 0x00, 0x00, 0x64, // channel = 100 (u32)
             0x2C, // flags: DEK=0, pattern 01, epoch 5 (5 << 3 | 0x04)
         ];
         let (header, flags) = parse_prefix(&prefix).expect("valid prefix");
         assert_eq!(header.from_id, 1);
         assert_eq!(header.to_id, 2);
-        assert_eq!(header.channel, 100);
-        assert_eq!(header.length, 64);
+        assert_eq!(header.channel, 100u32);
         assert_eq!(flags.mode(), Mode::Standard);
         assert_eq!(flags.epoch().bits(), 5);
         // Serialise back to the identical bytes (round-trip both ways).
@@ -397,19 +383,17 @@ mod tests {
 
     #[test]
     fn header_field_boundaries_round_trip_both_directions() {
+        // from_id and to_id: u16 boundary values.
         for &v in &[0u16, 1, u16::MAX] {
-            for field in 0..4 {
+            for field in 0..2usize {
                 let mut h = Header {
                     from_id: 0x1111,
                     to_id: 0x2222,
-                    channel: 0x3333,
-                    length: 0x4444,
+                    channel: 0x3333_4444,
                 };
                 match field {
                     0 => h.from_id = v,
-                    1 => h.to_id = v,
-                    2 => h.channel = v,
-                    _ => h.length = v,
+                    _ => h.to_id = v,
                 }
                 // value -> bytes -> value
                 let bytes = h.to_bytes();
@@ -418,6 +402,17 @@ mod tests {
                 assert_eq!(Header::from_bytes(bytes).to_bytes(), bytes);
             }
         }
+        // channel: u32 boundary values.
+        for &v in &[0u32, 1, u32::MAX] {
+            let h = Header {
+                from_id: 0x1111,
+                to_id: 0x2222,
+                channel: v,
+            };
+            let bytes = h.to_bytes();
+            assert_eq!(Header::from_bytes(bytes), h, "channel value {v}");
+            assert_eq!(Header::from_bytes(bytes).to_bytes(), bytes);
+        }
         // All-zero and all-max headers round-trip as wholes, through the
         // full prefix codec as well.
         for h in [
@@ -425,13 +420,11 @@ mod tests {
                 from_id: 0,
                 to_id: 0,
                 channel: 0,
-                length: 0,
             },
             Header {
                 from_id: u16::MAX,
                 to_id: u16::MAX,
-                channel: u16::MAX,
-                length: u16::MAX,
+                channel: u32::MAX,
             },
         ] {
             let flags = Flags::new(Mode::Dek, ep(31));
@@ -505,13 +498,12 @@ mod tests {
                 from_id: 7,
                 to_id: 8,
                 channel: 100,
-                length: 42,
             },
             &Flags::new(Mode::Dek, ep(9)),
         );
         frame[..PREFIX_LEN].copy_from_slice(&prefix);
         let (h, f) = parse_prefix(&frame).expect("prefix of a longer frame");
-        assert_eq!(h.length, 42);
+        assert_eq!(h.channel, 100u32);
         assert_eq!(f, Flags::new(Mode::Dek, ep(9)));
     }
 

@@ -1,0 +1,7 @@
+# Keep the docker build context skinny: the classic builder has no
+# cache mounts, so a fat context slows every `docker build` and bloats
+# the image layer. target/ alone is gigabytes on a built tree.
+target/
+.tmp/
+.git/
+Cargo.lock
