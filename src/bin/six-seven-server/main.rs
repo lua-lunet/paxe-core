@@ -1,7 +1,7 @@
 //! six-seven-server — a two-node key-value store whose only interesting
 //! property is that every node-to-node hop is a PAXE datagram.
 //!
-//! It exists for the same reason `vrr-core` ships a Maelstrom node: to run
+//! It exists for the same reason `uvrr-core` ships a Maelstrom node: to run
 //! the core over a real socket, against a real peer, doing real work, so
 //! the library is exercised as a consumer would exercise it rather than
 //! only by its own tests. Unlike that harness there is no Jepsen, no

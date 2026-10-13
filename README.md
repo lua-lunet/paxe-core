@@ -72,8 +72,9 @@ required to run it before the first network operation:
 The requirement: **treat a startup-check failure as fatal for PAXE.** Refuse
 to enable it; surface the error to the operator verbatim. The failure text
 says what is wrong and what satisfies it (e.g. the linked libsodium lacks the
-ARM crypto-extension path; a `1.0.20+` build with ARM CE, or the
-self-contained flavour of this crate, does not). There is no silent
+ARM crypto-extension path; a build with ARM CE does not, and
+["What the linked sodium must provide"](#what-the-linked-sodium-must-provide)
+names the releases and carries the recipe). There is no silent
 degradation path — that is the point. This is exactly when a wrong linkage
 flavour or a bad distro sodium surfaces: immediately, with a named cause,
 before any traffic flows.
@@ -129,6 +130,61 @@ fallback — a missing library fails the build rather than silently linking some
 The `sodium-dynamic` feature is rejected at build time on Windows: there is no system
 libsodium provider there, so the self-contained flavour is the only Windows artefact.
 
+### What the linked sodium must provide
+
+One requirement governs both flavours: the linked libsodium's
+`crypto_aead_aes256gcm_is_available()` must answer **1**, because the codec
+requires the hardware AES-256-GCM path and refuses to run without it. A host
+whose sodium answers 0 fails at `startup_check()` / `lunet_paxe_init()`, by
+design: no weaker cipher is ever substituted. The startup check is what makes
+this a requirement you can test, not a hope you hold.
+
+Having **an** archive is not having the path. The named traps, both hit in
+this family:
+
+- **The distro gap (init refusal).** Ubuntu 24.04 and Debian trixie on arm64
+  ship libsodium **1.0.18**, whose build has no ARM Crypto Extensions path.
+  `libsodium-dev` installs cleanly, the static link succeeds, and every PAXE
+  test then fails at init with `SodiumError::AesGcmUnavailable`. The archive
+  is present; the path is not.
+- **The build gap (compile failure).** libsodium **1.0.20 and 1.0.21** carry
+  the ARM Crypto Extensions path but do not compile under the arm64 GCC in
+  current runners: `crypto_ipcrypt/ipcrypt_armcrypto.c` reinterprets an
+  `int8x16_t` where a `uint8x16_t` is required, and GCC rejects it outright.
+  1.0.22 fixed the signedness upstream.
+
+So the release to require is **1.0.22**: the one that has the path *and*
+builds, and the one Homebrew already ships on macOS. To put it on a Linux
+host (or any host whose sodium you cannot upgrade):
+
+```bash
+VERSION=1.0.22
+SHA256=adbdd8f16149e81ac6078a03aca6fc03b592b89ef7b5ed83841c086191be3349
+curl -fsSLO "https://download.libsodium.org/libsodium/releases/libsodium-${VERSION}.tar.gz"
+echo "${SHA256}  libsodium-${VERSION}.tar.gz" | sha256sum -c -
+tar xzf "libsodium-${VERSION}.tar.gz" && cd "libsodium-${VERSION}"
+./configure --enable-static --disable-shared --prefix=/tmp/libsodium
+make -j"$(nproc)" && make install
+export PAXE_SODIUM_LIB_DIR=/tmp/libsodium/lib   # build.rs consults this first
+```
+
+`--disable-shared` is load-bearing: with a `.so` beside the `.a`, a "static"
+link can still resolve to the shared object. And a note on the digest:
+libsodium publishes no checksum file at its release index (the
+`SHA256SUMS` URL is a 404), so the digest above is recorded from the tarball
+fetched at that URL, not taken from upstream.
+
+Diagnosing a suspect host is one call, before any traffic flows:
+
+```rust
+paxe::startup_check()   // Err(SodiumError::AesGcmUnavailable) names the host
+```
+
+Consumers carrying working scripts of their own: `uvrr-core`'s
+`scripts/build_libsodium.sh`, and `lua-lunet/lunet`'s
+`contributing/deps/sodium-src.sh` (commit `88b16d1`, where this gap was hit
+and fixed the first time).
+
 ## Platform priority
 
 **Linux (amd64 and aarch64) is the release target**, both flavours, tested and published per
@@ -179,7 +235,7 @@ does not own forwards the whole operation to its peer inside a sealed frame and
 relays the answer back — so the demo exercises seal, transmit, open and reply
 without needing any distributed-systems machinery to justify itself.
 
-Unlike vrr-core's Maelstrom node there is no Jepsen and no verdict here. PAXE is
+Unlike uvrr-core's Maelstrom node there is no Jepsen and no verdict here. PAXE is
 a datagram codec, not a consensus protocol; there is nothing for a
 linearizability checker to check.
 
