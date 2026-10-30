@@ -1,6 +1,6 @@
 [package]
 name = "paxe-core"
-version = "0.3.0"
+version = "0.3.1"
 # Edition 2021, deliberately not 2024: this crate has zero dependencies and
 # needs nothing from the newer edition, and 2021 keeps the toolchain floor
 # low and the unsafe-attribute syntax simple (#[no_mangle], not
@@ -54,6 +54,13 @@ sodium-dynamic = []
 # `#[cfg(test)]` alone does not reach integration tests, which compile this
 # crate as a normal dependency.
 kat = []
+# Runs the FFI canary: the integration test in tests/ffi_canary.rs spawns
+# python3 on tests/ffi_canary.py, which drives the built cdylib's C ABI
+# through ctypes (round-trip, committed-vector opens, tamper opacity).
+# Off by default: the canary needs a python3 interpreter and only makes
+# sense in a development environment. It exercises the exact symbols the
+# Lua runtime binds, from an independent foreign-function client.
+ffi-canary = []
 
 # DEPENDENCY POLICY: zero crates. Not libc, not zeroize, not secrecy, not a
 # crypto crate. All cryptography AND all secure-memory handling come from

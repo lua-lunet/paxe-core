@@ -87,6 +87,16 @@ fn standard_known_answer_vector_is_exact() {
     let frame = standard::seal_standard_deterministic(&store(), TO, CHANNEL, ep(EPOCH), V2, NONCE)
         .expect("seal");
     assert_eq!(frame, unhex(V2_FRAME_HEX));
+
+    // The committed vector is not trusted produce-only: the receiver side
+    // must open the exact bytes and recover the exact payload, so a stale
+    // or mistyped vector fails loudly instead of matching a broken seal.
+    let mut receiver = KeyStore::new(TO).expect("store");
+    receiver.install(FROM, ep(EPOCH), &PSK).expect("install");
+    let (header, _flags, plain) = dek::open(&receiver, &frame).expect("open");
+    assert_eq!(header.from_id, FROM);
+    assert_eq!(header.to_id, TO);
+    assert_eq!(plain, V2);
 }
 
 #[test]
@@ -117,4 +127,19 @@ fn reusable_dek_two_recipient_known_answer_vector_is_exact() {
         frames[0].frame.len(),
         FANOUT_PAYLOAD.len() + dek::DEK_OVERHEAD
     );
+
+    // Each recipient's frame must open with that recipient's link key and
+    // recover the shared payload: the committed bytes are proven openable,
+    // not merely reproducible.
+    let mut receiver = KeyStore::new(TO).expect("store");
+    receiver.install(FROM, ep(EPOCH), &PSK).expect("install");
+    let (_, _, plain) = dek::open(&receiver, &frames[0].frame).expect("open frame for TO");
+    assert_eq!(plain, FANOUT_PAYLOAD);
+
+    let mut second = KeyStore::new(0x0C0E).expect("store");
+    second
+        .install(FROM, ep(8), &[0x55; KEYBYTES])
+        .expect("install");
+    let (_, _, plain) = dek::open(&second, &frames[1].frame).expect("open frame for second");
+    assert_eq!(plain, FANOUT_PAYLOAD);
 }
