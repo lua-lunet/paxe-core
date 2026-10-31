@@ -6,11 +6,8 @@ name: Build
 # (v*) additionally package and publish the release archives.
 #
 # PLATFORM PRIORITY: Linux amd64 + aarch64 are the release target (both
-# flavours). macOS is best-effort, kept for local-dev parity. Windows is
-# DISABLED in this matrix for now (Blacksmith Windows runners are slow and
-# there is no system-sodium provider there anyway); the code supports it
-# via the self-contained flavour and it can rejoin the matrix when needed.
-#
+# flavours). macOS is best-effort, kept for local-dev parity. Windows ships
+# the self-contained flavour only (no system-sodium provider there).#
 # TWO FLAVOURS, published together on every tag (README.md documents the
 # tradeoffs; the project recommends neither):
 #
@@ -59,8 +56,7 @@ jobs:
       - id: set-matrix
         run: |
           TARGETS="${{ github.event.inputs.targets }}"
-          ALL='{"include":[{"os":"ubuntu-latest","platform":"linux","target_key":"linux-amd64"},{"os":"blacksmith-4vcpu-ubuntu-2404-arm","platform":"linux","target_key":"linux-arm64"},{"os":"macos-latest","platform":"macos","target_key":"macos"}]}'
-          if [ -z "$TARGETS" ]; then
+          ALL='{"include":[{"os":"ubuntu-latest","platform":"linux","target_key":"linux-amd64"},{"os":"blacksmith-4vcpu-ubuntu-2404-arm","platform":"linux","target_key":"linux-arm64"},{"os":"macos-latest","platform":"macos","target_key":"macos"},{"os":"windows-latest","platform":"windows","target_key":"windows"}]}'          if [ -z "$TARGETS" ]; then
             echo "matrix=$ALL" >> "$GITHUB_OUTPUT"
           else
             FILTERED='{"include":['
@@ -72,8 +68,8 @@ jobs:
                 linux-amd64) ENTRY='{"os":"ubuntu-latest","platform":"linux","target_key":"linux-amd64"}' ;;
                 linux-arm64) ENTRY='{"os":"blacksmith-4vcpu-ubuntu-2404-arm","platform":"linux","target_key":"linux-arm64"}' ;;
                 macos)       ENTRY='{"os":"macos-latest","platform":"macos","target_key":"macos"}' ;;
-                *) echo "Unknown target: $target" >&2; continue ;;
-              esac
+                windows)     ENTRY='{"os":"windows-latest","platform":"windows","target_key":"windows"}' ;;
+                *) echo "Unknown target: $target" >&2; continue ;;              esac
               if [ "$FIRST" = true ]; then
                 FILTERED="$FILTERED$ENTRY"; FIRST=false
               else
@@ -117,8 +113,20 @@ jobs:
     - name: Cache cargo artifacts
       uses: Swatinem/rust-cache@v2
 
-    # Linux: build libsodium 1.0.22 from source into /tmp/libsodium. The
-    # distro package is unusable for the STATIC flavour on aarch64 (Ubuntu
+    - name: Setup vcpkg (Windows)
+      if: matrix.platform == 'windows'
+      uses: lukka/run-vcpkg@v11
+      with:
+        vcpkgGitCommitId: '66c0373dc7fca549e5803087b9487edfe3aca0a1'
+      env:
+        VCPKG_BINARY_SOURCES: 'clear;nuget,readwrite'
+
+    - name: Install system libsodium via vcpkg (Windows)
+      if: matrix.platform == 'windows'
+      shell: pwsh
+      run: vcpkg install libsodium:x64-windows
+
+    # Linux: build libsodium 1.0.22 from source into /tmp/libsodium. The    # distro package is unusable for the STATIC flavour on aarch64 (Ubuntu
     # 24.04 ships 1.0.18 without the ARM crypto extensions, and 1.0.21 does
     # not compile on aarch64 with GCC — fixed in 1.0.22); source-building
     # on both arches keeps the static flavour's primitives identical.
@@ -143,6 +151,7 @@ jobs:
     # fails fast (at init, never silently) where the distro build lacks the
     # AES-GCM hardware path. macOS: Homebrew is the system provider.
     - name: Install system libsodium (dynamic flavour provider)
+      if: matrix.platform != 'windows'
       run: |
         set -euo pipefail
         if [ "${{ matrix.platform }}" = "linux" ]; then
@@ -181,13 +190,13 @@ jobs:
         bash tests/aes_gcm_kat.sh
 
     # Two-node e2e over real sockets: the script is bash and drives the
-    # demo binary with nc.
+    # demo binary with nc. Unix only.
     - name: End-to-end test
+      if: matrix.platform != 'windows'
       shell: bash
       run: |
         cargo build --bins
         bash tests/six_seven_e2e.sh
-
     # ----- Dynamic flavour: gate the suite and build the artefact.
     #
     # On arm64 Linux the distro sodium (1.0.18) lacks the ARM crypto
@@ -198,6 +207,7 @@ jobs:
     # sodium (soname 23) so it loads on any maintained distro; where the
     # distro build lacks AES-GCM the startup check fails fast, loudly.
     - name: Test suite, system-sodium flavour
+      if: matrix.platform != 'windows'
       shell: bash
       run: |
         set -euo pipefail
@@ -210,6 +220,7 @@ jobs:
         cargo test --test kat_from_json --features "kat,sodium-dynamic"
 
     - name: Build system-sodium release artefact
+      if: matrix.platform != 'windows'
       shell: bash
       run: |
         set -euo pipefail
@@ -240,20 +251,23 @@ jobs:
       run: |
         set -euo pipefail
         case "${{ matrix.platform }}" in
-          macos) ART=target/release/libpaxe.dylib; TOOL="otool -L" ;;
-          *)     ART=target/release/libpaxe.so;     TOOL=ldd ;;
+          macos)    ART=target/release/libpaxe.dylib; TOOL="otool -L" ;;
+          windows)  ART=target/release/paxe.dll;      TOOL="true" ;;
+          *)        ART=target/release/libpaxe.so;     TOOL=ldd ;;
         esac
         if [ ! -f "$ART" ]; then echo "missing artefact: $ART" >&2; exit 1; fi
         # Static flavour: the cdylib must carry NO dynamic libsodium
         # dependency; a regression that silently links the shared library
-        # fails here.
-        if $TOOL "$ART" | grep -q sodium; then
+        # fails here. (Windows has no system sodium to link against.)
+        if [ "${{ matrix.platform }}" != "windows" ] && $TOOL "$ART" | grep -q sodium; then
           echo "FAIL: self-contained cdylib links libsodium dynamically" >&2
           exit 1
         fi
         echo "self-contained cdylib OK (statically linked): $ART"
 
     - name: Package release archives
+      if: matrix.platform != 'windows'
+      shell: bash
       run: |
         set -euo pipefail
         # Self-contained flavour: cdylib + staticlib, no runtime deps.
@@ -277,6 +291,18 @@ jobs:
         esac
         cp LICENSE README.md PAXE.md "$DIST2/"
         tar -C "$DIST2" -czf "paxe-core-${{ matrix.target_key }}-system-sodium.tar.gz" .
+
+    - name: Package release archives (Windows)
+      if: matrix.platform == 'windows'
+      shell: pwsh
+      run: |
+        $ErrorActionPreference = "Stop"
+        $dist = Join-Path $env:RUNNER_TEMP ("paxe-dist-" + $env:GITHUB_RUN_ID)
+        New-Item -ItemType Directory -Path $dist -Force | Out-Null
+        Copy-Item target/release/paxe.dll $dist
+        Copy-Item target/release/paxe.lib $dist -ErrorAction SilentlyContinue
+        Copy-Item LICENSE, README.md, PAXE.md $dist
+        Compress-Archive -Path (Join-Path $dist "*") -DestinationPath paxe-core-windows.zip -Force
 
     - name: Upload release archives
       uses: actions/upload-artifact@v4
@@ -310,7 +336,9 @@ jobs:
             echo "missing release asset: paxe-core-$target-system-sodium.tar.gz" >&2; exit 1
           }
         done
-
+        test -f "release-assets/paxe-core-windows.zip" || {
+          echo "missing release asset: paxe-core-windows.zip" >&2; exit 1
+        }
     - name: Create GitHub release
       uses: softprops/action-gh-release@v2
       with:
@@ -347,8 +375,9 @@ jobs:
 
           **Targets:** `linux-amd64` and `linux-arm64` are the release target.
           macOS is best-effort (local-development parity); its system-sodium
-          artefact links whatever Homebrew ships at build time.
-
+          artefact links whatever Homebrew ships at build time. Windows ships
+          the self-contained flavour only (`paxe-core-windows.zip`); there is
+          no system-sodium provider there.
           Call the startup check (`lunet_paxe_init` from the C ABI;
           `paxe::startup_check()` from Rust) before the first network
           operation and treat failure as fatal for PAXE — that is the
@@ -358,6 +387,6 @@ jobs:
           release-assets/paxe-core-linux-amd64.tar.gz
           release-assets/paxe-core-linux-arm64.tar.gz
           release-assets/paxe-core-macos.tar.gz
-          release-assets/paxe-core-linux-amd64-system-sodium.tar.gz
-          release-assets/paxe-core-linux-arm64-system-sodium.tar.gz
+          release-assets/paxe-core-windows.zip
+          release-assets/paxe-core-linux-amd64-system-sodium.tar.gz          release-assets/paxe-core-linux-arm64-system-sodium.tar.gz
           release-assets/paxe-core-macos-system-sodium.tar.gz
