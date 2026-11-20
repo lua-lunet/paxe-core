@@ -26,8 +26,20 @@ on:
     branches: [ main ]
     tags:
       - 'v*'
+    # Docs-only churn must not buy four-platform runner minutes. GitHub does
+    # not evaluate path filters for tag pushes, so a v* release tag still
+    # builds and publishes from the very same commit.
+    paths-ignore:
+      - 'docs/**'
+      - '**/*.md'
   pull_request:
     branches: [ main ]
+    # Same on the PR side: a docs-only PR has nothing to compile. This repo
+    # configures no required status checks, so a skipped run cannot leave a
+    # PR blocked (skipped checks only sit "Pending" where they are required).
+    paths-ignore:
+      - 'docs/**'
+      - '**/*.md'
   workflow_dispatch:
     inputs:
       ref:
